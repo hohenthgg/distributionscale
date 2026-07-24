@@ -426,6 +426,33 @@ function unifySections(escSections, shiftAware) {
   return out;
 }
 
+// tenta casar a aba do xlsx com a escala (ex.: escala "Varginha" + AM/PM -> aba "VGSVC")
+function pickMatchingSheet(sheetNames, escSource, wantSuffix) {
+  const norm = (s) => String(s).toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Z]/g, "");
+  const loc = norm(escSource);
+  if (!loc || !sheetNames?.length) return null;
+  const MONTHS_RE = /JUL|JAN|FEV|MAR|ABR|MAI|JUN|AGO|SET|OUT|NOV|DEZ/g;
+  const SUFFIXES = ["SVC", "SD", "FULL", "XD"];
+  const isSubseq = (sub, str) => { if (!sub) return false; let i = 0; for (const ch of str) { if (ch === sub[i]) i++; if (i === sub.length) return true; } return false; };
+  let best = null, bestScore = 0;
+  sheetNames.forEach((name) => {
+    const N = norm(name).replace(MONTHS_RE, "");
+    const suffix = SUFFIXES.find((s) => N.includes(s)) || "";
+    const prefix = suffix ? N.slice(0, N.indexOf(suffix)) : N;
+    let score = 0;
+    if (prefix && isSubseq(prefix, loc)) score += 3;          // localidade da escala bate com o prefixo da aba
+    if (wantSuffix && suffix === wantSuffix) score += 2;       // tipo (SVC/SD) bate
+    if (score > bestScore) { bestScore = score; best = name; }
+  });
+  return bestScore >= 3 ? best : null;
+}
+// tipo de aba esperado a partir das seções da escala (AM+PM -> SVC; só SD -> SD)
+function wantSuffixOf(secs) {
+  const hasAM = secs.some((s) => shiftOf(s.name) === "AM");
+  const hasPM = secs.some((s) => shiftOf(s.name) === "PM");
+  return hasAM && hasPM ? "SVC" : secs.some((s) => /^SD$/i.test(s.name)) ? "SD" : null;
+}
+
 /* ============ parse: aba de absenteísmo (modelo 1) ============ */
 function parseAbsSheet(ws) {
   const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
@@ -803,6 +830,7 @@ export default function EscalaApp() {
     return m ? +m[1] : new Date().getFullYear();
   }, [empsSource, escSource, sheetName]);
   const [openCell, setOpenCell] = useState(null); // {wi, serie, di}
+  const [openDay, setOpenDay] = useState(null); // {wi, di} — detalhe do dia (modo sem série)
   const [errors, setErrors] = useState([]);
   const [view, setView] = useState("confronto"); // confronto | distribuir | insights
   const xlsxRef = useRef(null), csvRef = useRef(null);
@@ -820,7 +848,7 @@ export default function EscalaApp() {
   const clearAll = () => {
     setWb(null); setSheetName(""); setEmps(null); setEmpsSource("");
     setEscSections(null); setEscSource(""); setSectionName("");
-    setOpenCell(null); setErrors([]); setView("confronto");
+    setOpenCell(null); setOpenDay(null); setErrors([]); setView("confronto");
     if (xlsxRef.current) xlsxRef.current.value = "";
     if (csvRef.current) csvRef.current.value = "";
   };
@@ -831,10 +859,12 @@ export default function EscalaApp() {
       const buf = await file.arrayBuffer();
       const w = XLSX.read(buf);
       setWb(w); setEmpsSource(file.name);
-      const first = w.SheetNames[0];
-      setSheetName(first);
-      const r = parseAbsSheet(w.Sheets[first]);
-      if (r.error) { pushError(`${first}: ${r.error}`); setEmps(null); } else setEmps(r.emps);
+      // se a escala já está carregada, casa a aba (ex.: Varginha -> VGSVC); senão usa a primeira
+      let target = w.SheetNames[0];
+      if (escSections) { const m = pickMatchingSheet(w.SheetNames, escSource, wantSuffixOf(escSections)); if (m) target = m; }
+      setSheetName(target);
+      const r = parseAbsSheet(w.Sheets[target]);
+      if (r.error) { pushError(`${target}: ${r.error}`); setEmps(null); } else setEmps(r.emps);
       setOpenCell(null);
     } catch (e) { pushError("Falha ao ler o .xlsx: " + e.message); }
   };
@@ -851,6 +881,15 @@ export default function EscalaApp() {
       const secs = parseEscalaCsv(text);
       if (!secs.length) { pushError("Não encontrei blocos de escala no CSV (esperado o modelo com 'Series ativas' e semanas)."); return; }
       setEscSections(secs); setEscSource(file.name); setSectionName(secs[0].name); setOpenCell(null);
+      // se o xlsx já está carregado, casa a aba com esta escala (ex.: Varginha -> VGSVC)
+      if (wb) {
+        const m = pickMatchingSheet(wb.SheetNames, file.name, wantSuffixOf(secs));
+        if (m && m !== sheetName) {
+          setSheetName(m);
+          const r = parseAbsSheet(wb.Sheets[m]);
+          if (r.error) { pushError(`${m}: ${r.error}`); setEmps(null); } else setEmps(r.emps);
+        }
+      }
     } catch (e) { pushError("Falha ao ler o CSV: " + e.message); }
   };
 
@@ -884,11 +923,13 @@ export default function EscalaApp() {
       }));
       // presentes/ausências de TODAS as pessoas no dia (usado quando a nominal não separa por série)
       const dayAll = dates.map((date) => {
-        const c = { present: 0, absent: 0, total: 0 };
+        const c = { present: 0, absent: 0, total: 0, date, people: [] };
         if (date.m === mainMonth && date.d >= 1 && date.d <= 31) {
           for (const e of emps) {
-            const g = codeInfo(e[4].split("|")[date.d - 1] || "").group;
+            const code = e[4].split("|")[date.d - 1] || "";
+            const g = codeInfo(code).group;
             c.total++;
+            c.people.push({ nome: e[0], cargo: e[2], lider: e[3], code });
             if (g === "present") c.present++;
             else if (g === "absent") c.absent++;
           }
@@ -965,10 +1006,6 @@ export default function EscalaApp() {
 
         {/* controles */}
         <div style={{ ...S.panel, padding: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
-          <button style={{ ...S.btn, background: `linear-gradient(180deg, ${P.headFrom}, ${P.headTo})`, borderColor: P.blue, color: "#fff" }} onClick={loadExample}>
-            ▶ Carregar exemplo (PA SVC · Julho)
-          </button>
-          <span style={{ width: 1, height: 24, background: P.borderSoft }} />
           <input ref={xlsxRef} type="file" accept=".xlsx,.xlsm" style={{ display: "none" }} onChange={(e) => { if (e.target.files[0]) onXlsx(e.target.files[0]); e.target.value = ""; }} />
           <button style={S.btn} onClick={() => xlsxRef.current.click()}>1 · Planilha de absenteísmo (.xlsx)</button>
           {wb && (
@@ -1009,8 +1046,7 @@ export default function EscalaApp() {
           <div style={{ ...S.panel, padding: "48px 32px", textAlign: "center", color: P.muted, fontSize: 14, maxWidth: 720, margin: "0 auto" }}>
             <div style={{ fontSize: 16, color: P.textSoft, fontWeight: 600, marginBottom: 6 }}>Comece carregando os dados</div>
             <div style={{ lineHeight: 1.6 }}>
-              Envie a <b style={{ color: P.textSoft }}>planilha de absenteísmo (.xlsx)</b> e o <b style={{ color: P.textSoft }}>CSV de escala</b> —
-              ou clique em <b style={{ color: P.blue }}>Carregar exemplo</b> para explorar o caso Pouso Alegre SVC.
+              Envie a <b style={{ color: P.textSoft }}>planilha de absenteísmo (.xlsx)</b> e o <b style={{ color: P.textSoft }}>CSV de escala</b> para começar.
             </div>
           </div>
         )}
@@ -1045,7 +1081,7 @@ export default function EscalaApp() {
             )}
 
             {view === "confronto" && (
-              <ConfrontoView model={model} section={section} mainMonth={mainMonth} serieCounts={serieCounts} openCell={openCell} setOpenCell={setOpenCell} S={S} />
+              <ConfrontoView model={model} section={section} mainMonth={mainMonth} serieCounts={serieCounts} openCell={openCell} setOpenCell={setOpenCell} openDay={openDay} setOpenDay={setOpenDay} S={S} />
             )}
             {view === "distribuir" && <DistribuirView A={A} section={section} serieCounts={serieCounts} splittable={model.presentSplittable !== false} S={S} />}
             {view === "absenteismo" && <AbsenteismoView model={model} section={section} mainMonth={mainMonth} year={year} splittable={model.presentSplittable !== false} S={S} />}
@@ -1058,7 +1094,7 @@ export default function EscalaApp() {
 }
 
 /* ============ view: CONFRONTAR (grade meta × presença) ============ */
-function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOpenCell, S }) {
+function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOpenCell, openDay, setOpenDay, S }) {
   const splittable = model.presentSplittable !== false;
   const pl = (v) => (typeof v === "number" ? v : v === "DSR" ? "DSR" : "—");
   return (
@@ -1067,7 +1103,7 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
         S={S}
         text={splittable
           ? <>Cada célula mostra <b style={{ color: P.text }}>presentes / meta</b> do dia. Cores sinalizam <span style={{ color: P.red }}>déficit crítico</span>, <span style={{ color: P.amber }}>déficit</span> e <span style={{ color: P.blue }}>excedente</span>; células verdes são <b style={{ color: P.green }}>DSR</b> (folga da série). Clique numa célula para explodir quem é quem.</>
-          : <>Quadro fixo da escala por série (A/B/C/D), com a <b style={{ color: P.text }}>meta AM+PM</b> de cada dia. Como a planilha nominal não separa por série, os <b style={{ color: P.text }}>presentes</b> aparecem no total do dia (linha <b>Total dia</b>).</>}
+          : <>Quadro fixo da escala por série (A/B/C/D), com a <b style={{ color: P.text }}>meta AM+PM</b> de cada dia. Como a planilha nominal não separa por série, os <b style={{ color: P.text }}>presentes</b> aparecem na linha <b>Presentes</b> (total do dia) — clique numa célula dessa linha para ver quem está presente, ausente e o motivo.</>}
       />
       {/* legenda */}
       <div style={{ ...S.panel, padding: "8px 12px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14, fontSize: 11 }}>
@@ -1130,10 +1166,10 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                           return (
                             <td key={di} style={{ padding: 4, verticalAlign: "top" }}>
                               <button
-                                onClick={() => setOpenCell(isOpen ? null : { wi: w.wi, serie: row.serie, di })}
-                                title={cell.alerts.map((al) => al.msg).join("\n") || "Sem alertas"}
+                                onClick={splittable ? () => setOpenCell(isOpen ? null : { wi: w.wi, serie: row.serie, di }) : undefined}
+                                title={splittable ? (cell.alerts.map((al) => al.msg).join("\n") || "Sem alertas") : ""}
                                 style={{
-                                  width: "100%", minHeight: 58, cursor: cell.inMonth ? "pointer" : "default",
+                                  width: "100%", minHeight: 58, cursor: splittable && cell.inMonth ? "pointer" : "default",
                                   background: isOpen ? "#1b2740" : !cell.inMonth ? "#0a1220" : isDsr ? "rgba(60,189,119,.10)" : "#0d1628",
                                   border: `1px solid ${!cell.inMonth ? P.borderSoft : border}${isOpen ? "" : isDsr ? "" : "70"}`,
                                   borderRadius: 8, padding: "6px 8px", color: "inherit", textAlign: "left",
@@ -1201,6 +1237,43 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                       )}
                     </React.Fragment>
                   ))}
+                  {/* linha de presentes (modo sem série) — clicável para ver o dia */}
+                  {!splittable && (
+                    <React.Fragment>
+                      <tr>
+                        <td style={{ padding: "6px 12px", fontSize: 13, fontWeight: 800, color: P.green, borderTop: `1px solid ${P.border}` }}>Presentes</td>
+                        {w.dates.map((dt, di) => {
+                          const da = w.dayAll?.[di];
+                          const anyIn = w.rows.some((r) => r.cells[di].inMonth);
+                          const target = w.rows.reduce((s, r) => s + (typeof r.cells[di].escVal === "number" ? r.cells[di].escVal : 0), 0);
+                          const isOpenD = openDay && openDay.wi === w.wi && openDay.di === di;
+                          const ok = da && da.present >= target;
+                          return (
+                            <td key={di} style={{ padding: 4, verticalAlign: "top", borderTop: `1px solid ${P.border}` }}>
+                              {anyIn ? (
+                                <button onClick={() => setOpenDay(isOpenD ? null : { wi: w.wi, di })}
+                                  title="Clique para ver quem está presente/ausente neste dia"
+                                  style={{ width: "100%", cursor: "pointer", background: isOpenD ? "#1b2740" : "#0d1628", border: `1px solid ${(ok ? P.green : P.amber)}70`, borderRadius: 8, padding: "6px 8px", color: "inherit", textAlign: "left", boxShadow: isOpenD ? `0 0 0 1px ${ok ? P.green : P.amber}` : "none" }}>
+                                  <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
+                                    <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: ok ? P.green : P.amber }}>{da.present}</span>
+                                    <span style={{ fontSize: 10, color: P.faint }}>/ {target}</span>
+                                  </div>
+                                  <div style={{ fontSize: 9, color: P.muted, marginTop: 1 }}>{da.absent} aus · ver detalhe</div>
+                                </button>
+                              ) : <span style={{ fontSize: 10, color: P.faint }}>—</span>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                      {openDay && openDay.wi === w.wi && (
+                        <tr>
+                          <td colSpan={8} style={{ padding: "0 8px 12px" }}>
+                            <DayDetail day={w.dayAll[openDay.di]} onClose={() => setOpenDay(null)} S={S} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  )}
                   {/* totais do dia */}
                   <tr>
                     <td style={{ padding: "7px 12px", fontSize: 11, color: P.muted, borderTop: `1px solid ${P.border}` }}>Total dia</td>
@@ -1546,6 +1619,49 @@ function ViewIntro({ text, S }) {
   return (
     <div style={{ fontSize: 12.5, color: P.muted, lineHeight: 1.55, margin: "12px auto 14px", maxWidth: 820, textAlign: "center" }}>
       {text}
+    </div>
+  );
+}
+
+/* ============ painel de detalhe do DIA (modo sem série) ============ */
+function DayDetail({ day, onClose, S }) {
+  const groups = [
+    { key: "present", title: "Presentes" },
+    { key: "absent", title: "Ausências" },
+    { key: "dsr", title: "Descanso (DSR)" },
+    { key: "planned", title: "Programado (FE / FO / BH)" },
+    { key: "off", title: "Desligados" },
+    { key: "none", title: "Sem registro" },
+  ];
+  const byGroup = {};
+  (day.people || []).forEach((p) => { const g = codeInfo(p.code).group; (byGroup[g] = byGroup[g] || []).push(p); });
+  Object.values(byGroup).forEach((arr) => arr.sort((a, b) => a.nome.localeCompare(b.nome)));
+  return (
+    <div style={{ background: P.panelSoft, border: `1px solid ${P.border}`, borderRadius: 10, padding: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
+        <b style={{ fontSize: 14 }}>Dia {pad2(day.date.d)}/{pad2(day.date.m)} · {day.total} pessoas</b>
+        <span style={{ fontSize: 12, color: P.muted }}>{day.present} presentes · {day.absent} ausências</span>
+        <button onClick={onClose} style={{ marginLeft: "auto", background: "none", border: `1px solid ${P.border}`, color: P.muted, borderRadius: 6, padding: "3px 10px", cursor: "pointer", fontSize: 12 }}>Fechar ✕</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))", gap: 12 }}>
+        {groups.map((g) => {
+          const arr = byGroup[g.key];
+          if (!arr?.length) return null;
+          return (
+            <div key={g.key} style={{ background: P.panel, border: `1px solid ${P.borderSoft}`, borderRadius: 8, padding: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: P.muted, letterSpacing: ".06em", textTransform: "uppercase", marginBottom: 8 }}>{g.title} <span style={{ color: P.blue }}>· {arr.length}</span></div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 260, overflowY: "auto" }}>
+                {arr.map((p, i) => (
+                  <div key={i} title={`${p.cargo}${p.lider ? " · Líder: " + p.lider : ""}`} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, padding: "3px 4px", borderRadius: 5 }}>
+                    <Chip code={p.code} small />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.nome}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
