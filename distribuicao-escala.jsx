@@ -367,17 +367,26 @@ function empsAreShiftAware(emps) {
   return emps.some((e) => /(^|[^A-Z])(AM|PM)([^A-Z]|$)/.test(String(e[1]).toUpperCase()));
 }
 
-// mescla seções de turno (AM + PM) somando as metas por série/dia; DSR só permanece se for DSR em ambos
+// mescla seções de turno (AM + PM) somando as metas por série/dia; DSR só permanece se for DSR em ambos.
+// mantém A/B/C/D e guarda a composição por turno (ex.: 42 AM + 38 PM = 80) em `parts`.
 function mergeShiftSections(base, secs) {
+  const am = secs.find((s) => shiftOf(s.name) === "AM");
+  const pm = secs.find((s) => shiftOf(s.name) === "PM");
   const series = secs.find((s) => s.series.length)?.series.slice() || [];
   const weeksCount = Math.max(...secs.map((s) => s.weeks.length));
+  const numOr0 = (v) => (typeof v === "number" ? v : 0);
   const weeks = [];
   for (let wi = 0; wi < weeksCount; wi++) {
     const refW = secs.map((s) => s.weeks[wi]).find(Boolean);
     if (!refW) continue;
     const rows = {};
+    const parts = {};
     series.forEach((se) => {
+      parts[se] = [];
       rows[se] = Array.from({ length: 7 }, (_, di) => {
+        const amV = am?.weeks[wi]?.rows[se]?.[di];
+        const pmV = pm?.weeks[wi]?.rows[se]?.[di];
+        parts[se][di] = { am: amV, pm: pmV };
         let sum = 0, allDsr = true, any = false;
         secs.forEach((s) => {
           const v = s.weeks[wi]?.rows[se]?.[di];
@@ -386,10 +395,10 @@ function mergeShiftSections(base, secs) {
           if (typeof v === "number") { sum += v; allDsr = false; }
         });
         if (!any) return undefined;
-        return allDsr ? "DSR" : sum;
+        return allDsr ? "DSR" : numOr0(amV) + numOr0(pmV);
       });
     });
-    weeks.push({ ...refW, rows, totals: null });
+    weeks.push({ ...refW, rows, parts, totals: null });
   }
   return { title: `${base} - AM+PM`, name: "AM+PM", series, weeks, merged: true };
 }
@@ -437,15 +446,32 @@ function parseAbsSheet(ws) {
   });
   if (!Object.keys(dayCols).length) return { error: "Não encontrei colunas de dias (ex.: '1 Qua') nesta aba." };
 
-  const emps = [];
+  // índice das linhas de dados
+  const dataRows = [];
   for (let r = hi + 1; r < grid.length; r++) {
-    const row = grid[r];
-    const nome = String(row[nameI] || "").trim();
-    if (!nome) continue;
-    const days = [];
-    for (let d = 1; d <= 31; d++) days.push(dayCols[d] != null ? String(row[dayCols[d]] || "").trim().toUpperCase() : "");
-    emps.push([nome, String(row[turnoI] || "").trim().toUpperCase() || "?", String(cargoI >= 0 ? row[cargoI] : "").trim(), String(lidI >= 0 ? row[lidI] : "").trim(), days.join("|")]);
+    if (String(grid[r][nameI] || "").trim()) dataRows.push(grid[r]);
   }
+
+  // detecta a coluna de série: a coluna (fora as conhecidas) com mais valores de uma única letra A-Z.
+  // usa "Turno" se ele mesmo for de letras; caso contrário procura em qualquer outra coluna.
+  const dayColSet = new Set(Object.values(dayCols));
+  const singleLetter = (v) => /^[A-Z]$/.test(String(v).trim().toUpperCase());
+  let serieI = turnoI, bestLetters = -1;
+  header.forEach((h, i) => {
+    if (i === nameI || i === cargoI || i === lidI || dayColSet.has(i)) return;
+    const n = dataRows.reduce((acc, row) => acc + (singleLetter(row[i]) ? 1 : 0), 0);
+    if (n > bestLetters) { bestLetters = n; serieI = i; }
+  });
+  // se nem "Turno" nem outra coluna tem letras suficientes, mantém Turno (série ficará "?")
+  if (bestLetters <= 0) serieI = turnoI;
+
+  const emps = dataRows.map((row) => [
+    String(row[nameI] || "").trim(),
+    String(row[serieI] || "").trim().toUpperCase() || "?",
+    String(cargoI >= 0 ? row[cargoI] : "").trim(),
+    String(lidI >= 0 ? row[lidI] : "").trim(),
+    Array.from({ length: 31 }, (_, d) => (dayCols[d + 1] != null ? String(row[dayCols[d + 1]] || "").trim().toUpperCase() : "")).join("|"),
+  ]);
   return { emps };
 }
 
@@ -465,7 +491,7 @@ function detectMainMonth(section, year) {
 }
 
 /* ============ cruzamento escala × pessoas ============ */
-function buildCell(escVal, date, mainMonth, serie, emps) {
+function buildCell(escVal, date, mainMonth, serie, emps, parts) {
   const isAll = serie === "__ALL__"; // modo agregado: considera todas as pessoas (planilha sem série)
   const inMonth = date.m === mainMonth && date.d >= 1 && date.d <= 31;
   const people = [];
@@ -501,7 +527,7 @@ function buildCell(escVal, date, mainMonth, serie, emps) {
   // absenteísmo em relação ao programado na escala (ex.: 100 previstos, 10 faltas = 10%)
   const absBase = typeof escVal === "number" ? escVal : 0;
   const absRate = absBase > 0 ? counts.absent / absBase : null;
-  return { escVal, date, serie: isAll ? "Total" : serie, inMonth, people, counts, alerts, total, absBase, absRate };
+  return { escVal, date, serie: isAll ? "Total" : serie, inMonth, people, counts, alerts, total, absBase, absRate, parts: parts || null };
 }
 
 /* ============ paleta / tema (inspirado no 2º print) ============ */
@@ -569,31 +595,61 @@ function analyze(model, section) {
   let targetSum = 0, presentSum = 0, dsrViol = 0, absTotal = 0, excess = 0, deficit = 0, days = 0, okDays = 0;
   let worst = null, best = null;
 
-  model.weeks.forEach((w) => w.rows.forEach((r) => r.cells.forEach((c, di) => {
-    if (!c.inMonth) return;
-    const sm = series[r.serie];
-    if (sm) sm.absent += c.counts.absent;
-    if (c.escVal === "DSR") {
-      dsrViol += c.counts.present;
-      if (sm) sm.dsrDays++;
-    } else if (typeof c.escVal === "number") {
-      targetSum += c.escVal; presentSum += c.counts.present;
-      weekdays[di].target += c.escVal; weekdays[di].present += c.counts.present;
-      if (sm) { sm.target += c.escVal; sm.present += c.counts.present; }
-      const gap = c.counts.present - c.escVal;
-      days++;
-      if (gap >= 0) okDays++;
-      if (gap > 0) excess += gap;
-      if (gap < 0) {
-        deficit += -gap;
-        if (!worst || gap < worst.gap) worst = { serie: r.serie, date: c.date, gap, wi: w.wi, target: c.escVal, present: c.counts.present };
+  const splittable = model.presentSplittable !== false;
+
+  if (splittable) {
+    model.weeks.forEach((w) => w.rows.forEach((r) => r.cells.forEach((c, di) => {
+      if (!c.inMonth) return;
+      const sm = series[r.serie];
+      if (sm) sm.absent += c.counts.absent;
+      if (c.escVal === "DSR") {
+        dsrViol += c.counts.present;
+        if (sm) sm.dsrDays++;
+      } else if (typeof c.escVal === "number") {
+        targetSum += c.escVal; presentSum += c.counts.present;
+        weekdays[di].target += c.escVal; weekdays[di].present += c.counts.present;
+        if (sm) { sm.target += c.escVal; sm.present += c.counts.present; }
+        const gap = c.counts.present - c.escVal;
+        days++;
+        if (gap >= 0) okDays++;
+        if (gap > 0) excess += gap;
+        if (gap < 0) {
+          deficit += -gap;
+          if (!worst || gap < worst.gap) worst = { serie: r.serie, date: c.date, gap, wi: w.wi, target: c.escVal, present: c.counts.present };
+        }
+        if (!best || gap > best.gap) best = { serie: r.serie, date: c.date, gap };
       }
-      if (!best || gap > best.gap) best = { serie: r.serie, date: c.date, gap };
-    }
-    c.people.forEach((p) => {
-      if (codeInfo(p.code).group === "absent") { absByCode[p.code] = (absByCode[p.code] || 0) + 1; absTotal++; }
+      c.people.forEach((p) => {
+        if (codeInfo(p.code).group === "absent") { absByCode[p.code] = (absByCode[p.code] || 0) + 1; absTotal++; }
+      });
+    })));
+  } else {
+    // sem série individual: metas por série (para o quadro), presentes/ausências no total do dia
+    model.weeks.forEach((w) => {
+      w.rows.forEach((r) => r.cells.forEach((c) => {
+        if (!c.inMonth) return;
+        const sm = series[r.serie];
+        if (c.escVal === "DSR") { if (sm) sm.dsrDays++; }
+        else if (typeof c.escVal === "number") { if (sm) sm.target += c.escVal; }
+      }));
+      w.dates.forEach((date, di) => {
+        if (!w.rows.some((r) => r.cells[di].inMonth)) return;
+        let prog = 0, anyWork = false;
+        w.rows.forEach((r) => { const c = r.cells[di]; if (typeof c.escVal === "number") { prog += c.escVal; anyWork = true; } });
+        if (!anyWork) return;
+        const present = w.dayAll?.[di]?.present || 0;
+        targetSum += prog; presentSum += present;
+        weekdays[di].target += prog; weekdays[di].present += present;
+        absTotal += w.dayAll?.[di]?.absent || 0;
+        const gap = present - prog;
+        days++;
+        if (gap >= 0) okDays++;
+        if (gap > 0) excess += gap;
+        if (gap < 0) { deficit += -gap; if (!worst || gap < worst.gap) worst = { serie: null, date, gap, wi: w.wi, target: prog, present }; }
+        if (!best || gap > best.gap) best = { serie: null, date, gap };
+      });
     });
-  })));
+  }
 
   weekdays.forEach((d) => (d.gap = d.present - d.target));
   const seriesArr = serieList.map((s) => {
@@ -635,7 +691,7 @@ function buildInsights(a) {
   if (a.worst) {
     cards.push({
       tone: "red", title: "Dia mais crítico",
-      value: `Série ${a.worst.serie} · ${pad2(a.worst.date.d)}/${pad2(a.worst.date.m)}`,
+      value: `${a.worst.serie ? `Série ${a.worst.serie} · ` : ""}${pad2(a.worst.date.d)}/${pad2(a.worst.date.m)}`,
       detail: `Faltaram ${-a.worst.gap} pessoa(s) para a meta (${a.worst.present} de ${a.worst.target}).`,
       advice: "Antecipe cobertura: puxe folga de outra série ou remaneje presenças de dias com excedente.",
     });
@@ -761,6 +817,14 @@ export default function EscalaApp() {
     setSectionName(secs[0]?.name || ""); setOpenCell(null); setView("confronto");
   };
 
+  const clearAll = () => {
+    setWb(null); setSheetName(""); setEmps(null); setEmpsSource("");
+    setEscSections(null); setEscSource(""); setSectionName("");
+    setOpenCell(null); setErrors([]); setView("confronto");
+    if (xlsxRef.current) xlsxRef.current.value = "";
+    if (csvRef.current) csvRef.current.value = "";
+  };
+
   const onXlsx = async (file) => {
     setErrors([]);
     try {
@@ -811,36 +875,29 @@ export default function EscalaApp() {
   const model = useMemo(() => {
     if (!section || !emps) return null;
     const series = section.series.length ? section.series : Object.keys(section.weeks[0]?.rows || {});
-    // meta total do dia (AM+PM unificado): soma das séries; DSR só se todas em DSR
-    const dayTotal = (w, di) => {
-      let sum = 0, allDsr = true, any = false;
-      series.forEach((s) => {
-        const v = w.rows[s]?.[di];
-        if (v === undefined) return;
-        any = true;
-        if (typeof v === "number") { sum += v; allDsr = false; }
-      });
-      if (!any) return undefined;
-      return allDsr ? "DSR" : sum;
-    };
     const weeks = section.weeks.map((w, wi) => {
       const dates = buildWeekDates(w, year);
-      let rows;
-      if (serieAware) {
-        rows = series.map((s) => ({
-          serie: s,
-          cells: dates.map((date, di) => buildCell(w.rows[s]?.[di], date, mainMonth, s, emps)),
-        }));
-      } else {
-        // planilha sem série: uma linha "Total" com todas as pessoas × meta somada do dia
-        rows = [{
-          serie: "Total",
-          cells: dates.map((date, di) => buildCell(dayTotal(w, di), date, mainMonth, "__ALL__", emps)),
-        }];
-      }
-      return { ...w, wi, dates, rows };
+      // sempre por série A/B/C/D; meta = AM+PM da série (com composição em w.parts)
+      const rows = series.map((s) => ({
+        serie: s,
+        cells: dates.map((date, di) => buildCell(w.rows[s]?.[di], date, mainMonth, s, emps, w.parts?.[s]?.[di])),
+      }));
+      // presentes/ausências de TODAS as pessoas no dia (usado quando a nominal não separa por série)
+      const dayAll = dates.map((date) => {
+        const c = { present: 0, absent: 0, total: 0 };
+        if (date.m === mainMonth && date.d >= 1 && date.d <= 31) {
+          for (const e of emps) {
+            const g = codeInfo(e[4].split("|")[date.d - 1] || "").group;
+            c.total++;
+            if (g === "present") c.present++;
+            else if (g === "absent") c.absent++;
+          }
+        }
+        return c;
+      });
+      return { ...w, wi, dates, rows, dayAll };
     });
-    return { weeks, aggregate: !serieAware };
+    return { weeks, presentSplittable: serieAware };
   }, [section, emps, year, mainMonth, serieAware]);
 
   const noSerie = useMemo(() => {
@@ -852,6 +909,19 @@ export default function EscalaApp() {
   const stats = useMemo(() => {
     if (!model) return null;
     let red = 0, amber = 0, blue = 0;
+    if (model.presentSplittable === false) {
+      // sem série: avalia o saldo por dia (presentes totais × programado)
+      model.weeks.forEach((w) => w.dates.forEach((date, di) => {
+        if (!w.rows.some((r) => r.cells[di].inMonth)) return;
+        let prog = 0, anyWork = false;
+        w.rows.forEach((r) => { const c = r.cells[di]; if (typeof c.escVal === "number") { prog += c.escVal; anyWork = true; } });
+        if (!anyWork) return;
+        const gap = (w.dayAll?.[di]?.present || 0) - prog;
+        if (gap < 0) { if (gap <= -Math.ceil(prog * 0.2)) red++; else amber++; }
+        else if (gap > 0) blue++;
+      }));
+      return { red, amber, blue };
+    }
     model.weeks.forEach((w) => w.rows.forEach((r) => r.cells.forEach((c) => c.alerts.forEach((al) => {
       if (al.sev === "red") red++; else if (al.sev === "amber") amber++; else if (al.sev === "blue") blue++;
     }))));
@@ -899,20 +969,25 @@ export default function EscalaApp() {
             ▶ Carregar exemplo (PA SVC · Julho)
           </button>
           <span style={{ width: 1, height: 24, background: P.borderSoft }} />
-          <input ref={xlsxRef} type="file" accept=".xlsx,.xlsm" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onXlsx(e.target.files[0])} />
+          <input ref={xlsxRef} type="file" accept=".xlsx,.xlsm" style={{ display: "none" }} onChange={(e) => { if (e.target.files[0]) onXlsx(e.target.files[0]); e.target.value = ""; }} />
           <button style={S.btn} onClick={() => xlsxRef.current.click()}>1 · Planilha de absenteísmo (.xlsx)</button>
           {wb && (
             <select style={S.select} value={sheetName} onChange={(e) => pickSheet(e.target.value)}>
               {wb.SheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
           )}
-          <input ref={csvRef} type="file" accept=".csv,.txt" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onCsv(e.target.files[0])} />
+          <input ref={csvRef} type="file" accept=".csv,.txt" style={{ display: "none" }} onChange={(e) => { if (e.target.files[0]) onCsv(e.target.files[0]); e.target.value = ""; }} />
           <button style={S.btn} onClick={() => csvRef.current.click()}>2 · Escala do site (.csv)</button>
           {displaySections && (
             <select style={S.select} value={section?.name || ""} onChange={(e) => { setSectionName(e.target.value); setOpenCell(null); }}>
               {displaySections.map((s) => <option key={s.name} value={s.name}>{s.name} — {sectionBase(s.title)}</option>)}
             </select>
           )}
+          <span style={{ width: 1, height: 24, background: P.borderSoft }} />
+          {(emps || escSections) && (
+            <button style={{ ...S.btn, borderColor: `${P.red}66`, color: P.red }} onClick={clearAll} title="Remove a planilha e a escala carregadas">Limpar dados</button>
+          )}
+          <button style={S.btn} onClick={() => window.location.reload()} title="Recarrega a página">Recarregar</button>
         </div>
 
         {/* fontes carregadas + erros */}
@@ -922,7 +997,7 @@ export default function EscalaApp() {
             {escSource && <span>Escala: <b style={{ color: P.textSoft }}>{escSource}</b>{section && ` · ${section.name} · séries ${section.series.join("/")}`}{section?.merged && <b style={{ color: P.green }}> · AM+PM unificado</b>}</span>}
             {escSource && !shiftAware && displaySections?.some((s) => s.merged) && !section?.merged && <span style={{ color: P.muted }}>· AM/PM unificados (planilha 1 sem distinção de turno)</span>}
             {mainMonth && <span>Mês: <b style={{ color: P.textSoft }}>{monthName(mainMonth)}/{year}</b></span>}
-            {model?.aggregate && <span style={{ color: P.amber }}>· planilha sem série: comparando por <b>total diário</b> (presentes × programado)</span>}
+            {model && model.presentSplittable === false && <span style={{ color: P.amber }}>· planilha sem série individual: presentes comparados por <b>total do dia</b></span>}
           </div>
         )}
         {errors.map((e, i) => (
@@ -972,8 +1047,8 @@ export default function EscalaApp() {
             {view === "confronto" && (
               <ConfrontoView model={model} section={section} mainMonth={mainMonth} serieCounts={serieCounts} openCell={openCell} setOpenCell={setOpenCell} S={S} />
             )}
-            {view === "distribuir" && <DistribuirView A={A} section={section} serieCounts={serieCounts} S={S} />}
-            {view === "absenteismo" && <AbsenteismoView model={model} section={section} mainMonth={mainMonth} year={year} S={S} />}
+            {view === "distribuir" && <DistribuirView A={A} section={section} serieCounts={serieCounts} splittable={model.presentSplittable !== false} S={S} />}
+            {view === "absenteismo" && <AbsenteismoView model={model} section={section} mainMonth={mainMonth} year={year} splittable={model.presentSplittable !== false} S={S} />}
             {view === "insights" && <InsightsView insights={insights} A={A} S={S} />}
           </>
         )}
@@ -984,11 +1059,15 @@ export default function EscalaApp() {
 
 /* ============ view: CONFRONTAR (grade meta × presença) ============ */
 function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOpenCell, S }) {
+  const splittable = model.presentSplittable !== false;
+  const pl = (v) => (typeof v === "number" ? v : v === "DSR" ? "DSR" : "—");
   return (
     <>
       <ViewIntro
         S={S}
-        text={<>Cada célula mostra <b style={{ color: P.text }}>presentes / meta</b> do dia. Cores sinalizam <span style={{ color: P.red }}>déficit crítico</span>, <span style={{ color: P.amber }}>déficit</span> e <span style={{ color: P.blue }}>excedente</span>; células verdes são <b style={{ color: P.green }}>DSR</b> (folga da série). Clique numa célula para explodir quem é quem.</>}
+        text={splittable
+          ? <>Cada célula mostra <b style={{ color: P.text }}>presentes / meta</b> do dia. Cores sinalizam <span style={{ color: P.red }}>déficit crítico</span>, <span style={{ color: P.amber }}>déficit</span> e <span style={{ color: P.blue }}>excedente</span>; células verdes são <b style={{ color: P.green }}>DSR</b> (folga da série). Clique numa célula para explodir quem é quem.</>
+          : <>Quadro fixo da escala por série (A/B/C/D), com a <b style={{ color: P.text }}>meta AM+PM</b> de cada dia. Como a planilha nominal não separa por série, os <b style={{ color: P.text }}>presentes</b> aparecem no total do dia (linha <b>Total dia</b>).</>}
       />
       {/* legenda */}
       <div style={{ ...S.panel, padding: "8px 12px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14, fontSize: 11 }}>
@@ -1034,7 +1113,7 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                       <tr>
                         <td style={{ padding: "6px 12px", fontWeight: 800, color: P.blue, fontSize: 15 }}>
                           {row.serie}
-                          <div style={{ fontSize: 10, color: P.faint, fontWeight: 500 }}>{serieCounts[row.serie] ?? (row.cells.find((c) => c.inMonth)?.total ?? 0)} pessoas</div>
+                          {splittable && <div style={{ fontSize: 10, color: P.faint, fontWeight: 500 }}>{serieCounts[row.serie] ?? (row.cells.find((c) => c.inMonth)?.total ?? 0)} pessoas</div>}
                         </td>
                         {row.cells.map((cell, di) => {
                           const isOpen = openCell && openCell.wi === w.wi && openCell.serie === row.serie && openCell.di === di;
@@ -1042,10 +1121,12 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                           const hasRed = cell.alerts.some((al) => al.sev === "red");
                           const hasAmber = cell.alerts.some((al) => al.sev === "amber");
                           const hasBlue = cell.alerts.some((al) => al.sev === "blue");
-                          const border = hasRed ? P.red : hasAmber ? P.amber : hasBlue ? P.blue : isDsr ? P.green : P.blueDim;
+                          const border = !splittable ? (isDsr ? P.green : P.blueDim) : hasRed ? P.red : hasAmber ? P.amber : hasBlue ? P.blue : isDsr ? P.green : P.blueDim;
                           const gap = typeof cell.escVal === "number" ? cell.counts.present - cell.escVal : null;
                           const absPct = cell.absRate != null ? Math.round(cell.absRate * 100) + "%" : null;
                           const absTone = cell.absRate == null ? P.muted : cell.absRate >= 0.2 ? P.red : cell.absRate > 0 ? P.amber : P.green;
+                          const comp = cell.parts && (typeof cell.parts.am === "number" || typeof cell.parts.pm === "number")
+                            ? `${pl(cell.parts.am)} AM · ${pl(cell.parts.pm)} PM` : null;
                           return (
                             <td key={di} style={{ padding: 4, verticalAlign: "top" }}>
                               <button
@@ -1066,14 +1147,15 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                   <>
                                     <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
                                       <span style={{ fontSize: 13, fontWeight: 800, color: P.green, letterSpacing: ".06em" }}>DSR</span>
-                                      <span style={{ fontSize: 9.5, color: P.muted }}>{cell.total} pes</span>
+                                      {splittable && <span style={{ fontSize: 9.5, color: P.muted }}>{cell.total} pes</span>}
                                     </div>
-                                    {cell.counts.present > 0 && (
+                                    {comp && <div style={{ fontSize: 9, color: P.blue, marginTop: 1 }}>{comp}</div>}
+                                    {splittable && cell.counts.present > 0 && (
                                       <div style={{ fontSize: 10, color: P.red, fontWeight: 700 }}>{cell.counts.present} presentes</div>
                                     )}
-                                    {cell.counts.absent > 0 && <div style={{ fontSize: 10, color: P.muted }}>{cell.counts.absent} ausências</div>}
+                                    {splittable && cell.counts.absent > 0 && <div style={{ fontSize: 10, color: P.muted }}>{cell.counts.absent} ausências</div>}
                                   </>
-                                ) : (
+                                ) : splittable ? (
                                   <>
                                     <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
                                       <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: hasRed ? P.red : hasAmber ? P.amber : P.green }}>
@@ -1082,6 +1164,7 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                       <span style={{ fontSize: 10, color: P.faint }}>/ {cell.escVal}</span>
                                       {gap !== null && gap !== 0 && <DiffBadge gap={gap} />}
                                     </div>
+                                    {comp && <div style={{ fontSize: 9, color: P.blue, marginTop: 1 }}>{comp}</div>}
                                     <div style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 9.5, marginTop: 2 }}>
                                       <span style={{ color: P.textSoft }}>{cell.total} pes</span>
                                       {absPct != null && <span style={{ color: absTone, fontWeight: 700 }}>abs {absPct}</span>}
@@ -1092,8 +1175,16 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                       {cell.counts.none > 0 && <span style={{ color: P.faint }}>{cell.counts.none} s/reg</span>}
                                     </div>
                                   </>
+                                ) : (
+                                  <>
+                                    <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
+                                      <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: P.blue }}>{cell.escVal}</span>
+                                      <span style={{ fontSize: 9.5, color: P.faint }}>meta</span>
+                                    </div>
+                                    {comp && <div style={{ fontSize: 9.5, color: P.textSoft, marginTop: 2 }}>{comp}</div>}
+                                  </>
                                 )}
-                                {cell.inMonth && cell.alerts.some((al) => al.sev !== "info") && (
+                                {splittable && cell.inMonth && cell.alerts.some((al) => al.sev !== "info") && (
                                   <span style={{ position: "absolute", top: 6, right: 7, width: 7, height: 7, borderRadius: "50%", background: border }} />
                                 )}
                               </button>
@@ -1115,7 +1206,9 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                     <td style={{ padding: "7px 12px", fontSize: 11, color: P.muted, borderTop: `1px solid ${P.border}` }}>Total dia</td>
                     {w.dates.map((dt, di) => {
                       const target = w.rows.reduce((s, r) => s + (typeof r.cells[di].escVal === "number" ? r.cells[di].escVal : 0), 0);
-                      const pres = w.rows.reduce((s, r) => s + (r.cells[di].inMonth ? r.cells[di].counts.present : 0), 0);
+                      const pres = model.presentSplittable === false
+                        ? (w.dayAll?.[di]?.present || 0)
+                        : w.rows.reduce((s, r) => s + (r.cells[di].inMonth ? r.cells[di].counts.present : 0), 0);
                       const anyIn = w.rows.some((r) => r.cells[di].inMonth);
                       return (
                         <td key={di} style={{ padding: "7px 6px", borderTop: `1px solid ${P.border}`, textAlign: "center", fontSize: 12 }}>
@@ -1132,8 +1225,8 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                 </tbody>
               </table>
             </div>
-            {/* resumo de folgas (2º print) — oculto no modo agregado (linha única "Total") */}
-            {!model.aggregate && <div style={{ padding: "9px 14px", borderTop: `1px solid ${P.borderSoft}`, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {/* resumo de folgas (2º print) */}
+            {<div style={{ padding: "9px 14px", borderTop: `1px solid ${P.borderSoft}`, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: P.muted }}>RESUMO</span>
               {folgas.map((f) => (
                 <span key={f.serie} style={{ fontSize: 11, color: P.green, border: `1px solid ${P.green}55`, background: "rgba(60,189,119,.10)", borderRadius: 20, padding: "3px 11px" }}>
@@ -1152,7 +1245,7 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
 }
 
 /* ============ view: DISTRIBUIR (equilíbrio do efetivo) ============ */
-function DistribuirView({ A, section, serieCounts, S }) {
+function DistribuirView({ A, section, serieCounts, splittable, S }) {
   const maxDayAbs = Math.max(1, ...A.weekdays.map((d) => Math.abs(d.gap)));
   return (
     <>
@@ -1160,6 +1253,11 @@ function DistribuirView({ A, section, serieCounts, S }) {
         S={S}
         text={<>Veja como o <b style={{ color: P.text }}>efetivo se distribui</b> entre séries e dias da semana. Séries com <span style={{ color: P.blue }}>sobra</span> podem apoiar as com <span style={{ color: P.amber }}>falta</span>; use isto para reequilibrar a escala antes de recorrer a hora extra.</>}
       />
+      {!splittable && (
+        <div style={{ ...S.panel, borderColor: `${P.amber}55`, background: "rgba(230,172,66,.08)", padding: "10px 14px", fontSize: 12.5, color: "#e2c08a", marginBottom: 14 }}>
+          <b>Atenção — </b>a planilha nominal não identifica a série de cada pessoa, então a aderência por série não pode ser calculada. Inclua uma coluna de série (A/B/C/D) na planilha para habilitar esta análise. O equilíbrio por dia da semana usa o total de presentes.
+        </div>
+      )}
 
       {/* por série */}
       <div style={{ ...S.panel, padding: 16, marginBottom: 16 }}>
@@ -1235,28 +1333,42 @@ const ABS_GROUPS = [
   { key: "motivo", label: "Por motivo" },
 ];
 
-function buildAbsRows(model, groupBy, serieFilter) {
+function buildAbsRows(model, groupBy, serieFilter, splittable) {
   const acc = new Map();
   const get = (key, label) => {
     let r = acc.get(key);
     if (!r) { r = { key, label, prog: 0, present: 0, absent: 0, byCode: {} }; acc.set(key, r); }
     return r;
   };
-  model.weeks.forEach((w) => w.rows.forEach((row) => {
-    if (serieFilter !== "ALL" && row.serie !== serieFilter) return;
-    row.cells.forEach((cell, di) => {
-      if (!cell.inMonth || typeof cell.escVal !== "number") return;
-      let r;
-      if (groupBy === "weekday") r = get(di, WEEKDAY_FULL[di]);
-      else if (groupBy === "week") r = get(w.wi, `${ORD[w.wi]} semana`);
-      else if (groupBy === "serie") r = get(row.serie, `Escala ${row.serie}`);
-      else r = get("all", "Mês inteiro");
-      r.prog += cell.escVal; r.present += cell.counts.present; r.absent += cell.counts.absent;
-      cell.people.forEach((p) => {
-        if (codeInfo(p.code).group === "absent") r.byCode[p.code] = (r.byCode[p.code] || 0) + 1;
+  if (splittable !== false) {
+    model.weeks.forEach((w) => w.rows.forEach((row) => {
+      if (serieFilter !== "ALL" && row.serie !== serieFilter) return;
+      row.cells.forEach((cell, di) => {
+        if (!cell.inMonth || typeof cell.escVal !== "number") return;
+        let r;
+        if (groupBy === "weekday") r = get(di, WEEKDAY_FULL[di]);
+        else if (groupBy === "week") r = get(w.wi, `${ORD[w.wi]} semana`);
+        else if (groupBy === "serie") r = get(row.serie, `Escala ${row.serie}`);
+        else r = get("all", "Mês inteiro");
+        r.prog += cell.escVal; r.present += cell.counts.present; r.absent += cell.counts.absent;
+        cell.people.forEach((p) => {
+          if (codeInfo(p.code).group === "absent") r.byCode[p.code] = (r.byCode[p.code] || 0) + 1;
+        });
       });
-    });
-  }));
+    }));
+  } else {
+    // sem série individual: por dia, presentes/ausências do total (dayAll)
+    model.weeks.forEach((w) => w.dates.forEach((date, di) => {
+      if (!w.rows.some((row) => row.cells[di].inMonth)) return;
+      let prog = 0, anyWork = false;
+      w.rows.forEach((row) => { const c = row.cells[di]; if (typeof c.escVal === "number") { prog += c.escVal; anyWork = true; } });
+      if (!anyWork) return;
+      const r = groupBy === "weekday" ? get(di, WEEKDAY_FULL[di]) : groupBy === "week" ? get(w.wi, `${ORD[w.wi]} semana`) : get("all", "Mês inteiro");
+      r.prog += prog;
+      r.present += w.dayAll?.[di]?.present || 0;
+      r.absent += w.dayAll?.[di]?.absent || 0;
+    }));
+  }
   let rows = [...acc.values()];
   if (groupBy === "weekday" || groupBy === "week") rows.sort((a, b) => a.key - b.key);
   else if (groupBy === "serie") rows.sort((a, b) => String(a.key).localeCompare(String(b.key)));
@@ -1264,11 +1376,14 @@ function buildAbsRows(model, groupBy, serieFilter) {
   return rows;
 }
 
-function AbsenteismoView({ model, section, mainMonth, year, S }) {
+function AbsenteismoView({ model, section, mainMonth, year, splittable, S }) {
   const [groupBy, setGroupBy] = useState("week");
   const [serieFilter, setSerieFilter] = useState("ALL");
+  const groupsAvail = splittable ? ABS_GROUPS : ABS_GROUPS.filter((g) => g.key === "weekday" || g.key === "week");
+  const effGroup = splittable ? groupBy : (groupBy === "serie" || groupBy === "motivo" ? "week" : groupBy);
+  const effFilter = splittable ? serieFilter : "ALL";
 
-  const rows = useMemo(() => buildAbsRows(model, groupBy, serieFilter), [model, groupBy, serieFilter]);
+  const rows = useMemo(() => buildAbsRows(model, effGroup, effFilter, splittable), [model, effGroup, effFilter, splittable]);
   const totals = useMemo(() => {
     const t = { prog: 0, present: 0, absent: 0, byCode: {} };
     rows.forEach((r) => {
@@ -1293,35 +1408,37 @@ function AbsenteismoView({ model, section, mainMonth, year, S }) {
     <>
       <ViewIntro
         S={S}
-        text={<>Quadro analítico de <b style={{ color: P.text }}>absenteísmo em relação ao programado na escala</b>. Selecione a dimensão (dia, semana, escala ou motivo) e filtre por série para enxergar onde a ausência mais pesa.</>}
+        text={<>Quadro analítico de <b style={{ color: P.text }}>absenteísmo em relação ao programado na escala</b>. {splittable ? "Selecione a dimensão (dia, semana, escala ou motivo) e filtre por série para enxergar onde a ausência mais pesa." : "Como a planilha nominal não separa por série, o absenteísmo é medido pelo total do dia (por dia da semana ou por semana)."}</>}
       />
 
       {/* controles: agrupar por + filtro de escala */}
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", justifyContent: "center", marginBottom: 14 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 11, color: P.muted, fontWeight: 600 }}>AGRUPAR</span>
-          {ABS_GROUPS.map((g) => (
-            <button key={g.key} style={btn(groupBy === g.key)} onClick={() => setGroupBy(g.key)}>{g.label}</button>
+          {groupsAvail.map((g) => (
+            <button key={g.key} style={btn(effGroup === g.key)} onClick={() => setGroupBy(g.key)}>{g.label}</button>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <span style={{ fontSize: 11, color: P.muted, fontWeight: 600 }}>ESCALA</span>
-          {seriesOpts.map((s) => (
-            <button key={s} style={btn(serieFilter === s)} onClick={() => setSerieFilter(s)}>{s === "ALL" ? "Todas" : s}</button>
-          ))}
-        </div>
+        {splittable && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span style={{ fontSize: 11, color: P.muted, fontWeight: 600 }}>ESCALA</span>
+            {seriesOpts.map((s) => (
+              <button key={s} style={btn(serieFilter === s)} onClick={() => setSerieFilter(s)}>{s === "ALL" ? "Todas" : s}</button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* KPIs do recorte */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", marginBottom: 16 }}>
         <StatTile label="Programado (escala)" value={totals.prog} tone="blue" sub={`${monthName(mainMonth)}/${year}`} />
         <StatTile label="Presenças" value={totals.present} tone="green" sub={pct(totals.prog ? totals.present / totals.prog : 0) + " de cobertura"} />
-        <StatTile label="Ausências" value={totals.absent} tone="amber" sub={serieFilter === "ALL" ? "todas as escalas" : `escala ${serieFilter}`} />
+        <StatTile label="Ausências" value={totals.absent} tone="amber" sub={effFilter === "ALL" ? "todas as escalas" : `escala ${effFilter}`} />
         <StatTile label="Absenteísmo" value={pct(totals.absRate)} tone={totals.absRate >= 0.2 ? "red" : totals.absRate > 0.1 ? "amber" : "green"} sub="ausências / programado" />
       </div>
 
       {/* tabela analítica */}
-      {groupBy !== "motivo" ? (
+      {effGroup !== "motivo" ? (
         <div style={{ ...S.panel, overflow: "hidden", marginBottom: 16 }}>
           <div style={{ overflowX: "auto" }}>
             <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 640 }}>
