@@ -1,0 +1,19 @@
+{
+  "name": "distributionscale",
+  "version": "1.0.0",
+  "description": "Distribuição de Escala - aplicação web para distribuição de escalas de trabalho",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild main.jsx --bundle --minify --format=iife --loader:.jsx=jsx --jsx=automatic --outfile=assets/app.js",
+    "dev": "esbuild main.jsx --bundle --format=iife --loader:.jsx=jsx --jsx=automatic --outfile=assets/app.js --servedir=. --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "xlsx": "^0.18.5"
+  }
+}
