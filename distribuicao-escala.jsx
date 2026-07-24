@@ -622,7 +622,7 @@ function buildInsights(a) {
   const cards = [];
   const adPct = pct(a.adher);
   cards.push({
-    icon: "🎯", tone: a.adher >= 0.98 ? "green" : a.adher >= 0.9 ? "amber" : "red",
+    tone: a.adher >= 0.98 ? "green" : a.adher >= 0.9 ? "amber" : "red",
     title: "Aderência à meta", value: adPct,
     detail: `${a.presentSum} presenças efetivas para uma meta acumulada de ${a.targetSum} no mês.`,
     advice: a.adher >= 0.98
@@ -634,7 +634,7 @@ function buildInsights(a) {
 
   if (a.worst) {
     cards.push({
-      icon: "🚨", tone: "red", title: "Dia mais crítico",
+      tone: "red", title: "Dia mais crítico",
       value: `Série ${a.worst.serie} · ${pad2(a.worst.date.d)}/${pad2(a.worst.date.m)}`,
       detail: `Faltaram ${-a.worst.gap} pessoa(s) para a meta (${a.worst.present} de ${a.worst.target}).`,
       advice: "Antecipe cobertura: puxe folga de outra série ou remaneje presenças de dias com excedente.",
@@ -643,14 +643,14 @@ function buildInsights(a) {
 
   if (a.dsrViol > 0) {
     cards.push({
-      icon: "🛌", tone: "red", title: "Furos de folga (DSR)",
+      tone: "red", title: "Furos de folga (DSR)",
       value: `${a.dsrViol} marcação(ões)`,
       detail: "Pessoas apontadas como presentes em dia de DSR da própria série.",
       advice: "Confira o apontamento: ou a folga não foi cumprida, ou o registro está incorreto.",
     });
   } else {
     cards.push({
-      icon: "🛌", tone: "green", title: "Folgas respeitadas",
+      tone: "green", title: "Folgas respeitadas",
       value: "0 furos",
       detail: "Nenhuma presença registrada em dia de DSR da série.",
       advice: "Padrão de descanso semanal sendo cumprido — bom indicador de organização.",
@@ -660,7 +660,7 @@ function buildInsights(a) {
   if (a.topAbsence) {
     const [code, n] = a.topAbsence;
     cards.push({
-      icon: "📉", tone: "amber", title: "Principal motivo de ausência",
+      tone: "amber", title: "Principal motivo de ausência",
       value: `${codeInfo(code).label} · ${n}`,
       detail: `${a.absTotal} ausência(s) no mês; '${codeInfo(code).label}' é a mais frequente.`,
       advice: code === "F"
@@ -671,7 +671,7 @@ function buildInsights(a) {
 
   if (a.excess > 0) {
     cards.push({
-      icon: "⚖️", tone: "blue", title: "Excedente realocável",
+      tone: "blue", title: "Excedente realocável",
       value: `${a.excess} posição(ões)`,
       detail: (a.surplusDay && a.surplusDay.gap > 0 ? `Maior sobra às ${a.surplusDay.wd} (+${a.surplusDay.gap}). ` : "") +
         (a.worstDay && a.worstDay.gap < 0 ? `Maior falta às ${a.worstDay.wd} (${a.worstDay.gap}).` : ""),
@@ -681,7 +681,7 @@ function buildInsights(a) {
 
   if (a.bestSerie && a.worstSerie && a.bestSerie.serie !== a.worstSerie.serie) {
     cards.push({
-      icon: "🏆", tone: "green", title: "Séries: melhor × pior",
+      tone: "green", title: "Séries: melhor × pior",
       value: `${a.bestSerie.serie} (${pct(a.bestSerie.adher)}) · ${a.worstSerie.serie} (${pct(a.worstSerie.adher)})`,
       detail: `Série ${a.bestSerie.serie} lidera em aderência; Série ${a.worstSerie.serie} é a que mais precisa de atenção.`,
       advice: `Use a Série ${a.bestSerie.serie} como referência de rotina e apoie a Série ${a.worstSerie.serie}.`,
@@ -706,7 +706,7 @@ function StatTile({ label, value, sub, tone = "blue" }) {
   );
 }
 
-function ViewTab({ active, icon, label, hint, onClick }) {
+function ViewTab({ active, label, hint, onClick }) {
   return (
     <button onClick={onClick} title={hint} style={{
       display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
@@ -716,7 +716,7 @@ function ViewTab({ active, icon, label, hint, onClick }) {
       color: active ? "#fff" : P.textSoft, borderRadius: 10, padding: "9px 20px",
       cursor: "pointer", fontSize: 14, fontWeight: 700, minWidth: 128, transition: "all .12s",
     }}>
-      <span>{icon} {label}</span>
+      <span>{label}</span>
       <span style={{ fontSize: 10, fontWeight: 500, color: active ? "#cfe0f6" : P.muted }}>{hint}</span>
     </button>
   );
@@ -926,13 +926,12 @@ export default function EscalaApp() {
           </div>
         )}
         {errors.map((e, i) => (
-          <div key={i} style={{ ...S.panel, borderColor: "#ef5b6255", background: "#1c1016", padding: "8px 12px", fontSize: 13, color: "#ef9ba0", marginBottom: 8 }}>⚠ {e}</div>
+          <div key={i} style={{ ...S.panel, borderColor: "#ef5b6255", background: "#1c1016", padding: "8px 12px", fontSize: 13, color: "#ef9ba0", marginBottom: 8 }}><b>Atenção — </b>{e}</div>
         ))}
 
         {/* estado vazio (centralizado) */}
         {!hasData && !errors.length && (
           <div style={{ ...S.panel, padding: "48px 32px", textAlign: "center", color: P.muted, fontSize: 14, maxWidth: 720, margin: "0 auto" }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>📊</div>
             <div style={{ fontSize: 16, color: P.textSoft, fontWeight: 600, marginBottom: 6 }}>Comece carregando os dados</div>
             <div style={{ lineHeight: 1.6 }}>
               Envie a <b style={{ color: P.textSoft }}>planilha de absenteísmo (.xlsx)</b> e o <b style={{ color: P.textSoft }}>CSV de escala</b> —
@@ -956,16 +955,16 @@ export default function EscalaApp() {
 
             {/* barra de ações / navegação */}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", marginBottom: 6 }}>
-              <ViewTab active={view === "confronto"} icon="⚔️" label="Confrontar" hint="meta × presença real" onClick={() => setView("confronto")} />
-              <ViewTab active={view === "distribuir"} icon="⚖️" label="Distribuir" hint="equilíbrio do efetivo" onClick={() => setView("distribuir")} />
-              <ViewTab active={view === "absenteismo"} icon="📋" label="Absenteísmo" hint="quadro analítico" onClick={() => setView("absenteismo")} />
-              <ViewTab active={view === "insights"} icon="💡" label="Insights" hint="leitura gerencial" onClick={() => setView("insights")} />
+              <ViewTab active={view === "confronto"} label="Confrontar" hint="meta × presença real" onClick={() => setView("confronto")} />
+              <ViewTab active={view === "distribuir"} label="Distribuir" hint="equilíbrio do efetivo" onClick={() => setView("distribuir")} />
+              <ViewTab active={view === "absenteismo"} label="Absenteísmo" hint="quadro analítico" onClick={() => setView("absenteismo")} />
+              <ViewTab active={view === "insights"} label="Insights" hint="leitura gerencial" onClick={() => setView("insights")} />
             </div>
 
             {/* aviso: pessoas sem série válida */}
             {noSerie.length > 0 && (
               <div style={{ ...S.panel, borderColor: "#e2a63b55", background: "#1a1610", padding: "8px 12px", fontSize: 12, color: "#e2c08a", margin: "12px 0" }}>
-                ⚠ {noSerie.length} pessoa(s) com turno fora das séries ativas ({section.series.join("/")}) e que ficaram fora da distribuição:{" "}
+                <b>Atenção — </b>{noSerie.length} pessoa(s) com turno fora das séries ativas ({section.series.join("/")}) e que ficaram fora da distribuição:{" "}
                 {noSerie.map((e) => `${e[0]} (${e[1]})`).join(" · ")}
               </div>
             )}
@@ -1070,7 +1069,7 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                       <span style={{ fontSize: 9.5, color: P.muted }}>{cell.total} pes</span>
                                     </div>
                                     {cell.counts.present > 0 && (
-                                      <div style={{ fontSize: 10, color: P.red, fontWeight: 700 }}>⚠ {cell.counts.present} presentes</div>
+                                      <div style={{ fontSize: 10, color: P.red, fontWeight: 700 }}>{cell.counts.present} presentes</div>
                                     )}
                                     {cell.counts.absent > 0 && <div style={{ fontSize: 10, color: P.muted }}>{cell.counts.absent} ausências</div>}
                                   </>
@@ -1219,7 +1218,7 @@ function DistribuirView({ A, section, serieCounts, S }) {
       {/* sugestão de realocação */}
       {A.worstDay && A.surplusDay && A.worstDay.gap < 0 && A.surplusDay.gap > 0 && (
         <div style={{ ...S.panel, borderColor: `${P.blue}55`, background: "rgba(95,159,227,.07)", padding: "12px 16px", fontSize: 13, color: P.textSoft }}>
-          💡 <b style={{ color: P.blue }}>Sugestão de reequilíbrio:</b> {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][A.surplusDay.i]} acumula <b style={{ color: P.green }}>+{A.surplusDay.gap}</b> de sobra
+          <b style={{ color: P.blue }}>Sugestão de reequilíbrio:</b> {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][A.surplusDay.i]} acumula <b style={{ color: P.green }}>+{A.surplusDay.gap}</b> de sobra
           enquanto {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][A.worstDay.i]} tem <b style={{ color: P.amber }}>{A.worstDay.gap}</b> de falta.
           Antecipar folgas ou remanejar presenças entre esses dias suaviza a cobertura sem aumentar o efetivo.
         </div>
@@ -1411,7 +1410,7 @@ function InsightsView({ insights, A, S }) {
         {insights.map((c, i) => (
           <div key={i} style={{ ...S.panel, borderColor: `${TONE[c.tone]}44`, padding: 14, display: "flex", flexDirection: "column", gap: 6 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 20 }}>{c.icon}</span>
+              <span style={{ width: 9, height: 9, borderRadius: 2, background: TONE[c.tone], flexShrink: 0 }} />
               <span style={{ fontSize: 12, fontWeight: 700, color: P.muted, letterSpacing: ".02em" }}>{c.title}</span>
             </div>
             <div style={{ fontSize: 18, fontWeight: 800, color: TONE[c.tone] }}>{c.value}</div>
