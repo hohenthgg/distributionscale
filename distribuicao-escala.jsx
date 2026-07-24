@@ -428,7 +428,12 @@ function buildCell(escVal, date, mainMonth, serie, emps) {
       if (counts.dsr > 0) alerts.push({ sev: "info", msg: `${counts.dsr} com DSR individual em dia de trabalho da série.` });
     }
   }
-  return { escVal, date, serie, inMonth, people, counts, alerts };
+  // total de pessoas da série no dia (contando DSR, pois a escala já prevê as folgas)
+  const total = people.length;
+  // absenteísmo em relação ao programado na escala (ex.: 100 previstos, 10 faltas = 10%)
+  const absBase = typeof escVal === "number" ? escVal : 0;
+  const absRate = absBase > 0 ? counts.absent / absBase : null;
+  return { escVal, date, serie, inMonth, people, counts, alerts, total, absBase, absRate };
 }
 
 /* ============ paleta / tema (inspirado no 2º print) ============ */
@@ -460,6 +465,7 @@ const sevColor = { red: P.red, amber: P.amber, blue: P.blue, info: P.muted, mute
 const MONTHS = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
 const monthName = (m) => MONTHS[m] || "";
 const ORD = ["1ª", "2ª", "3ª", "4ª", "5ª", "6ª", "7ª"];
+const WEEKDAY_FULL = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
 const pad2 = (n) => String(n).padStart(2, "0");
 const pct = (x) => (x * 100).toFixed(x >= 0.995 || x <= 0.005 ? 0 : 1) + "%";
 
@@ -665,7 +671,11 @@ export default function EscalaApp() {
   const [escSections, setEscSections] = useState(null);
   const [escSource, setEscSource] = useState("");
   const [sectionName, setSectionName] = useState("");
-  const [year, setYear] = useState(2026);
+  // ano detectado automaticamente (nome do arquivo / aba); cai para o ano atual
+  const year = useMemo(() => {
+    const m = `${empsSource} ${escSource} ${sheetName}`.match(/(20\d{2})/);
+    return m ? +m[1] : new Date().getFullYear();
+  }, [empsSource, escSource, sheetName]);
   const [openCell, setOpenCell] = useState(null); // {wi, serie, di}
   const [errors, setErrors] = useState([]);
   const [view, setView] = useState("confronto"); // confronto | distribuir | insights
@@ -797,11 +807,6 @@ export default function EscalaApp() {
               {escSections.map((s) => <option key={s.name} value={s.name}>{s.name} — {s.title.replace(/ - [^-]+$/, "")}</option>)}
             </select>
           )}
-          <label style={{ fontSize: 12, color: P.muted }}>
-            Ano{" "}
-            <input type="number" value={year} onChange={(e) => setYear(+e.target.value || 2026)}
-              style={{ ...S.select, width: 74, ...S.mono }} />
-          </label>
         </div>
 
         {/* fontes carregadas + erros */}
@@ -845,6 +850,7 @@ export default function EscalaApp() {
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", marginBottom: 6 }}>
               <ViewTab active={view === "confronto"} icon="⚔️" label="Confrontar" hint="meta × presença real" onClick={() => setView("confronto")} />
               <ViewTab active={view === "distribuir"} icon="⚖️" label="Distribuir" hint="equilíbrio do efetivo" onClick={() => setView("distribuir")} />
+              <ViewTab active={view === "absenteismo"} icon="📋" label="Absenteísmo" hint="quadro analítico" onClick={() => setView("absenteismo")} />
               <ViewTab active={view === "insights"} icon="💡" label="Insights" hint="leitura gerencial" onClick={() => setView("insights")} />
             </div>
 
@@ -860,6 +866,7 @@ export default function EscalaApp() {
               <ConfrontoView model={model} section={section} mainMonth={mainMonth} serieCounts={serieCounts} openCell={openCell} setOpenCell={setOpenCell} S={S} />
             )}
             {view === "distribuir" && <DistribuirView A={A} section={section} serieCounts={serieCounts} S={S} />}
+            {view === "absenteismo" && <AbsenteismoView model={model} section={section} mainMonth={mainMonth} year={year} S={S} />}
             {view === "insights" && <InsightsView insights={insights} A={A} S={S} />}
           </>
         )}
@@ -930,6 +937,8 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                           const hasBlue = cell.alerts.some((al) => al.sev === "blue");
                           const border = hasRed ? P.red : hasAmber ? P.amber : hasBlue ? P.blue : isDsr ? P.green : P.blueDim;
                           const gap = typeof cell.escVal === "number" ? cell.counts.present - cell.escVal : null;
+                          const absPct = cell.absRate != null ? Math.round(cell.absRate * 100) + "%" : null;
+                          const absTone = cell.absRate == null ? P.muted : cell.absRate >= 0.2 ? P.red : cell.absRate > 0 ? P.amber : P.green;
                           return (
                             <td key={di} style={{ padding: 4, verticalAlign: "top" }}>
                               <button
@@ -948,7 +957,10 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                   <span style={{ fontSize: 10, color: P.faint }}>{isDsr ? "DSR" : cell.escVal} · fora do mês</span>
                                 ) : isDsr ? (
                                   <>
-                                    <span style={{ fontSize: 13, fontWeight: 800, color: P.green, letterSpacing: ".06em" }}>DSR</span>
+                                    <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                                      <span style={{ fontSize: 13, fontWeight: 800, color: P.green, letterSpacing: ".06em" }}>DSR</span>
+                                      <span style={{ fontSize: 9.5, color: P.muted }}>{cell.total} pes</span>
+                                    </div>
                                     {cell.counts.present > 0 && (
                                       <div style={{ fontSize: 10, color: P.red, fontWeight: 700 }}>⚠ {cell.counts.present} presentes</div>
                                     )}
@@ -963,8 +975,11 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                       <span style={{ fontSize: 10, color: P.faint }}>/ {cell.escVal}</span>
                                       {gap !== null && gap !== 0 && <DiffBadge gap={gap} />}
                                     </div>
-                                    <div style={{ fontSize: 9.5, color: P.muted, marginTop: 2 }}>
-                                      {cell.counts.absent > 0 && <span style={{ color: "#ef9ba0" }}>{cell.counts.absent} aus · </span>}
+                                    <div style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 9.5, marginTop: 2 }}>
+                                      <span style={{ color: P.textSoft }}>{cell.total} pes</span>
+                                      {absPct != null && <span style={{ color: absTone, fontWeight: 700 }}>abs {absPct}</span>}
+                                    </div>
+                                    <div style={{ fontSize: 9, color: P.muted, marginTop: 1 }}>
                                       {cell.counts.dsr > 0 && <span>{cell.counts.dsr} dsr · </span>}
                                       {cell.counts.planned > 0 && <span>{cell.counts.planned} prog · </span>}
                                       {cell.counts.none > 0 && <span style={{ color: P.faint }}>{cell.counts.none} s/reg</span>}
@@ -1099,6 +1114,177 @@ function DistribuirView({ A, section, serieCounts, S }) {
           💡 <b style={{ color: P.blue }}>Sugestão de reequilíbrio:</b> {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][A.surplusDay.i]} acumula <b style={{ color: P.green }}>+{A.surplusDay.gap}</b> de sobra
           enquanto {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][A.worstDay.i]} tem <b style={{ color: P.amber }}>{A.worstDay.gap}</b> de falta.
           Antecipar folgas ou remanejar presenças entre esses dias suaviza a cobertura sem aumentar o efetivo.
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ============ view: ABSENTEÍSMO (quadro analítico) ============ */
+const ABS_GROUPS = [
+  { key: "weekday", label: "Por dia da semana" },
+  { key: "week", label: "Por semana" },
+  { key: "serie", label: "Por escala" },
+  { key: "motivo", label: "Por motivo" },
+];
+
+function buildAbsRows(model, groupBy, serieFilter) {
+  const acc = new Map();
+  const get = (key, label) => {
+    let r = acc.get(key);
+    if (!r) { r = { key, label, prog: 0, present: 0, absent: 0, byCode: {} }; acc.set(key, r); }
+    return r;
+  };
+  model.weeks.forEach((w) => w.rows.forEach((row) => {
+    if (serieFilter !== "ALL" && row.serie !== serieFilter) return;
+    row.cells.forEach((cell, di) => {
+      if (!cell.inMonth || typeof cell.escVal !== "number") return;
+      let r;
+      if (groupBy === "weekday") r = get(di, WEEKDAY_FULL[di]);
+      else if (groupBy === "week") r = get(w.wi, `${ORD[w.wi]} semana`);
+      else if (groupBy === "serie") r = get(row.serie, `Escala ${row.serie}`);
+      else r = get("all", "Mês inteiro");
+      r.prog += cell.escVal; r.present += cell.counts.present; r.absent += cell.counts.absent;
+      cell.people.forEach((p) => {
+        if (codeInfo(p.code).group === "absent") r.byCode[p.code] = (r.byCode[p.code] || 0) + 1;
+      });
+    });
+  }));
+  let rows = [...acc.values()];
+  if (groupBy === "weekday" || groupBy === "week") rows.sort((a, b) => a.key - b.key);
+  else if (groupBy === "serie") rows.sort((a, b) => String(a.key).localeCompare(String(b.key)));
+  rows.forEach((r) => (r.absRate = r.prog ? r.absent / r.prog : 0));
+  return rows;
+}
+
+function AbsenteismoView({ model, section, mainMonth, year, S }) {
+  const [groupBy, setGroupBy] = useState("week");
+  const [serieFilter, setSerieFilter] = useState("ALL");
+
+  const rows = useMemo(() => buildAbsRows(model, groupBy, serieFilter), [model, groupBy, serieFilter]);
+  const totals = useMemo(() => {
+    const t = { prog: 0, present: 0, absent: 0, byCode: {} };
+    rows.forEach((r) => {
+      t.prog += r.prog; t.present += r.present; t.absent += r.absent;
+      Object.entries(r.byCode).forEach(([c, n]) => (t.byCode[c] = (t.byCode[c] || 0) + n));
+    });
+    t.absRate = t.prog ? t.absent / t.prog : 0;
+    return t;
+  }, [rows]);
+
+  const maxRate = Math.max(0.0001, ...rows.map((r) => r.absRate));
+  const motivos = Object.entries(totals.byCode).sort((a, b) => b[1] - a[1]);
+  const seriesOpts = ["ALL", ...(section.series || [])];
+
+  const btn = (active) => ({
+    background: active ? `linear-gradient(180deg, ${P.headFrom}, ${P.headTo})` : "#101c36",
+    border: `1px solid ${active ? P.blue : P.borderSoft}`, color: active ? "#fff" : P.textSoft,
+    borderRadius: 8, padding: "6px 12px", cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+  });
+
+  return (
+    <>
+      <ViewIntro
+        S={S}
+        text={<>Quadro analítico de <b style={{ color: P.text }}>absenteísmo em relação ao programado na escala</b>. Selecione a dimensão (dia, semana, escala ou motivo) e filtre por série para enxergar onde a ausência mais pesa.</>}
+      />
+
+      {/* controles: agrupar por + filtro de escala */}
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", justifyContent: "center", marginBottom: 14 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: P.muted, fontWeight: 600 }}>AGRUPAR</span>
+          {ABS_GROUPS.map((g) => (
+            <button key={g.key} style={btn(groupBy === g.key)} onClick={() => setGroupBy(g.key)}>{g.label}</button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: P.muted, fontWeight: 600 }}>ESCALA</span>
+          {seriesOpts.map((s) => (
+            <button key={s} style={btn(serieFilter === s)} onClick={() => setSerieFilter(s)}>{s === "ALL" ? "Todas" : s}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* KPIs do recorte */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", marginBottom: 16 }}>
+        <StatTile label="Programado (escala)" value={totals.prog} tone="blue" sub={`${monthName(mainMonth)}/${year}`} />
+        <StatTile label="Presenças" value={totals.present} tone="green" sub={pct(totals.prog ? totals.present / totals.prog : 0) + " de cobertura"} />
+        <StatTile label="Ausências" value={totals.absent} tone="amber" sub={serieFilter === "ALL" ? "todas as escalas" : `escala ${serieFilter}`} />
+        <StatTile label="Absenteísmo" value={pct(totals.absRate)} tone={totals.absRate >= 0.2 ? "red" : totals.absRate > 0.1 ? "amber" : "green"} sub="ausências / programado" />
+      </div>
+
+      {/* tabela analítica */}
+      {groupBy !== "motivo" ? (
+        <div style={{ ...S.panel, overflow: "hidden", marginBottom: 16 }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 640 }}>
+              <thead>
+                <tr style={{ background: `linear-gradient(90deg, ${P.headFrom}, ${P.headTo})` }}>
+                  {["", "Programado", "Presenças", "Ausências", "Abs %", ""].map((h, i) => (
+                    <th key={i} style={{ padding: "10px 12px", fontSize: 11, color: "#dbe7fb", textAlign: i === 0 ? "left" : i === 5 ? "left" : "right", fontWeight: 700 }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const tone = r.absRate >= 0.2 ? P.red : r.absRate > 0.1 ? P.amber : P.green;
+                  return (
+                    <tr key={r.key} style={{ borderTop: `1px solid ${P.borderSoft}` }}>
+                      <td style={{ padding: "9px 12px", fontSize: 13, color: P.text, fontWeight: 600 }}>{r.label}</td>
+                      <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, color: P.textSoft }}>{r.prog}</td>
+                      <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, color: P.green }}>{r.present}</td>
+                      <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, color: P.amber }}>{r.absent}</td>
+                      <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, fontWeight: 800, color: tone }}>{pct(r.absRate)}</td>
+                      <td style={{ padding: "9px 12px", width: 160 }}>
+                        <div style={{ background: "#0b1526", border: `1px solid ${P.borderSoft}`, borderRadius: 5, height: 9, overflow: "hidden" }}>
+                          <div style={{ width: (r.absRate / maxRate) * 100 + "%", height: "100%", background: `linear-gradient(90deg, ${tone}99, ${tone})` }} />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {rows.length === 0 && (
+                  <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: P.muted, fontSize: 13 }}>Sem dias programados neste recorte.</td></tr>
+                )}
+              </tbody>
+              {rows.length > 1 && (
+                <tfoot>
+                  <tr style={{ borderTop: `2px solid ${P.border}` }}>
+                    <td style={{ padding: "9px 12px", fontSize: 12, color: P.muted, fontWeight: 700 }}>TOTAL</td>
+                    <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, color: P.textSoft }}>{totals.prog}</td>
+                    <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, color: P.green }}>{totals.present}</td>
+                    <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, color: P.amber }}>{totals.absent}</td>
+                    <td style={{ padding: "9px 12px", textAlign: "right", ...S.mono, fontWeight: 800, color: totals.absRate >= 0.2 ? P.red : totals.absRate > 0.1 ? P.amber : P.green }}>{pct(totals.absRate)}</td>
+                    <td />
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </div>
+      ) : (
+        <div style={{ ...S.panel, padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: P.textSoft, marginBottom: 4 }}>Ausências por motivo</div>
+          <div style={{ fontSize: 11, color: P.muted, marginBottom: 14 }}>Composição das {totals.absent} ausência(s){serieFilter !== "ALL" ? ` da escala ${serieFilter}` : ""} — participação de cada código no total.</div>
+          <div style={{ display: "grid", gap: 9 }}>
+            {motivos.map(([code, n]) => {
+              const share = totals.absent ? n / totals.absent : 0;
+              return (
+                <div key={code} style={{ display: "grid", gridTemplateColumns: "170px 1fr 96px", gap: 10, alignItems: "center" }}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12.5, color: P.textSoft }}>
+                    <Chip code={code} small /> {codeInfo(code).label}
+                  </span>
+                  <div style={{ background: "#0b1526", border: `1px solid ${P.borderSoft}`, borderRadius: 5, height: 11, overflow: "hidden" }}>
+                    <div style={{ width: share * 100 + "%", height: "100%", background: `linear-gradient(90deg, ${codeInfo(code).color}99, ${codeInfo(code).color})` }} />
+                  </div>
+                  <span style={{ textAlign: "right", ...S.mono, fontSize: 12.5, color: P.text }}>
+                    <b>{n}</b> <span style={{ color: P.muted }}>({pct(share)})</span>
+                  </span>
+                </div>
+              );
+            })}
+            {motivos.length === 0 && <div style={{ fontSize: 13, color: P.muted }}>Nenhuma ausência registrada neste recorte.</div>}
+          </div>
         </div>
       )}
     </>
