@@ -431,8 +431,37 @@ function buildCell(escVal, date, mainMonth, serie, emps) {
   return { escVal, date, serie, inMonth, people, counts, alerts };
 }
 
+/* ============ paleta / tema (inspirado no 2º print) ============ */
+const P = {
+  bg: "#0a1122",
+  panel: "#0f1a33",
+  panelSoft: "#0d1730",
+  inset: "#0b1526",
+  border: "#22375f",
+  borderSoft: "#1a2c4d",
+  headFrom: "#1d3768",
+  headTo: "#2a4d8c",
+  text: "#dce4f2",
+  textSoft: "#aeb9d0",
+  muted: "#7c88a0",
+  faint: "#4a566e",
+  blue: "#5f9fe3",
+  blueDim: "#3f6bab",
+  green: "#3cbd77",
+  greenDim: "#2a7a54",
+  amber: "#e6ac42",
+  red: "#ef5b62",
+  purple: "#9d7bf0",
+};
+const TONE = { blue: P.blue, green: P.green, amber: P.amber, red: P.red, muted: P.muted, purple: P.purple };
+
 /* ============ UI helpers ============ */
-const sevColor = { red: "#ef5b62", amber: "#e2a63b", blue: "#5a9bd4", info: "#8b93a1", muted: "#5d6a7d" };
+const sevColor = { red: P.red, amber: P.amber, blue: P.blue, info: P.muted, muted: P.faint };
+const MONTHS = ["", "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+const monthName = (m) => MONTHS[m] || "";
+const ORD = ["1ª", "2ª", "3ª", "4ª", "5ª", "6ª", "7ª"];
+const pad2 = (n) => String(n).padStart(2, "0");
+const pct = (x) => (x * 100).toFixed(x >= 0.995 || x <= 0.005 ? 0 : 1) + "%";
 
 function Chip({ code, small }) {
   const info = codeInfo(code);
@@ -447,11 +476,183 @@ function Chip({ code, small }) {
 }
 
 function DiffBadge({ gap }) {
-  const c = gap === 0 ? "#3fb96b" : gap < 0 ? "#e2a63b" : "#5a9bd4";
+  const c = gap === 0 ? P.green : gap < 0 ? P.amber : P.blue;
   return (
     <span style={{ fontSize: 10, fontWeight: 800, color: c, fontFamily: "ui-monospace, monospace" }}>
       {gap > 0 ? `+${gap}` : gap}
     </span>
+  );
+}
+
+/* ============ análise gerencial (KPIs, séries, dias, insights) ============ */
+function analyze(model, section) {
+  const series = {};
+  (section?.series || []).forEach((s) => (series[s] = { serie: s, target: 0, present: 0, dsrDays: 0, absent: 0 }));
+  const weekdays = WEEKDAYS.map((wd, i) => ({ wd, i, target: 0, present: 0, gap: 0 }));
+  const absByCode = {};
+  let targetSum = 0, presentSum = 0, dsrViol = 0, absTotal = 0, excess = 0, deficit = 0, days = 0, okDays = 0;
+  let worst = null, best = null;
+
+  model.weeks.forEach((w) => w.rows.forEach((r) => r.cells.forEach((c, di) => {
+    if (!c.inMonth) return;
+    const sm = series[r.serie];
+    if (sm) sm.absent += c.counts.absent;
+    if (c.escVal === "DSR") {
+      dsrViol += c.counts.present;
+      if (sm) sm.dsrDays++;
+    } else if (typeof c.escVal === "number") {
+      targetSum += c.escVal; presentSum += c.counts.present;
+      weekdays[di].target += c.escVal; weekdays[di].present += c.counts.present;
+      if (sm) { sm.target += c.escVal; sm.present += c.counts.present; }
+      const gap = c.counts.present - c.escVal;
+      days++;
+      if (gap >= 0) okDays++;
+      if (gap > 0) excess += gap;
+      if (gap < 0) {
+        deficit += -gap;
+        if (!worst || gap < worst.gap) worst = { serie: r.serie, date: c.date, gap, wi: w.wi, target: c.escVal, present: c.counts.present };
+      }
+      if (!best || gap > best.gap) best = { serie: r.serie, date: c.date, gap };
+    }
+    c.people.forEach((p) => {
+      if (codeInfo(p.code).group === "absent") { absByCode[p.code] = (absByCode[p.code] || 0) + 1; absTotal++; }
+    });
+  })));
+
+  weekdays.forEach((d) => (d.gap = d.present - d.target));
+  const seriesArr = (section?.series || []).map((s) => {
+    const m = series[s];
+    m.adher = m.target ? m.present / m.target : 1;
+    return m;
+  });
+  const adher = targetSum ? presentSum / targetSum : 0;
+
+  // ranking séries
+  const withTarget = seriesArr.filter((s) => s.target > 0);
+  const bestSerie = withTarget.slice().sort((a, b) => b.adher - a.adher)[0] || null;
+  const worstSerie = withTarget.slice().sort((a, b) => a.adher - b.adher)[0] || null;
+  const topAbsence = Object.entries(absByCode).sort((a, b) => b[1] - a[1])[0] || null;
+  const worstDay = weekdays.filter((d) => d.target > 0).slice().sort((a, b) => a.gap - b.gap)[0] || null;
+  const surplusDay = weekdays.filter((d) => d.target > 0).slice().sort((a, b) => b.gap - a.gap)[0] || null;
+
+  return {
+    targetSum, presentSum, adher, dsrViol, absTotal, absByCode,
+    excess, deficit, days, okDays, series: seriesArr, weekdays,
+    worst, best, bestSerie, worstSerie, topAbsence, worstDay, surplusDay,
+  };
+}
+
+function buildInsights(a) {
+  const cards = [];
+  const adPct = pct(a.adher);
+  cards.push({
+    icon: "🎯", tone: a.adher >= 0.98 ? "green" : a.adher >= 0.9 ? "amber" : "red",
+    title: "Aderência à meta", value: adPct,
+    detail: `${a.presentSum} presenças efetivas para uma meta acumulada de ${a.targetSum} no mês.`,
+    advice: a.adher >= 0.98
+      ? "Cobertura saudável. Mantenha o padrão de folgas e o apontamento em dia."
+      : a.adher >= 0.9
+        ? "Cobertura aceitável, mas há dias abaixo da meta — priorize reforço nos dias críticos."
+        : "Cobertura baixa: reveja distribuição das séries e trate as ausências recorrentes.",
+  });
+
+  if (a.worst) {
+    cards.push({
+      icon: "🚨", tone: "red", title: "Dia mais crítico",
+      value: `Série ${a.worst.serie} · ${pad2(a.worst.date.d)}/${pad2(a.worst.date.m)}`,
+      detail: `Faltaram ${-a.worst.gap} pessoa(s) para a meta (${a.worst.present} de ${a.worst.target}).`,
+      advice: "Antecipe cobertura: puxe folga de outra série ou remaneje presenças de dias com excedente.",
+    });
+  }
+
+  if (a.dsrViol > 0) {
+    cards.push({
+      icon: "🛌", tone: "red", title: "Furos de folga (DSR)",
+      value: `${a.dsrViol} marcação(ões)`,
+      detail: "Pessoas apontadas como presentes em dia de DSR da própria série.",
+      advice: "Confira o apontamento: ou a folga não foi cumprida, ou o registro está incorreto.",
+    });
+  } else {
+    cards.push({
+      icon: "🛌", tone: "green", title: "Folgas respeitadas",
+      value: "0 furos",
+      detail: "Nenhuma presença registrada em dia de DSR da série.",
+      advice: "Padrão de descanso semanal sendo cumprido — bom indicador de organização.",
+    });
+  }
+
+  if (a.topAbsence) {
+    const [code, n] = a.topAbsence;
+    cards.push({
+      icon: "📉", tone: "amber", title: "Principal motivo de ausência",
+      value: `${codeInfo(code).label} · ${n}`,
+      detail: `${a.absTotal} ausência(s) no mês; '${codeInfo(code).label}' é a mais frequente.`,
+      advice: code === "F"
+        ? "Faltas injustificadas puxam o absenteísmo — atue em disciplina e clima."
+        : "Acompanhe a evolução deste motivo para antecipar reposição de efetivo.",
+    });
+  }
+
+  if (a.excess > 0) {
+    cards.push({
+      icon: "⚖️", tone: "blue", title: "Excedente realocável",
+      value: `${a.excess} posição(ões)`,
+      detail: (a.surplusDay && a.surplusDay.gap > 0 ? `Maior sobra às ${a.surplusDay.wd} (+${a.surplusDay.gap}). ` : "") +
+        (a.worstDay && a.worstDay.gap < 0 ? `Maior falta às ${a.worstDay.wd} (${a.worstDay.gap}).` : ""),
+      advice: "Redistribua o excedente para os dias/séries deficitários antes de escalar hora extra.",
+    });
+  }
+
+  if (a.bestSerie && a.worstSerie && a.bestSerie.serie !== a.worstSerie.serie) {
+    cards.push({
+      icon: "🏆", tone: "green", title: "Séries: melhor × pior",
+      value: `${a.bestSerie.serie} (${pct(a.bestSerie.adher)}) · ${a.worstSerie.serie} (${pct(a.worstSerie.adher)})`,
+      detail: `Série ${a.bestSerie.serie} lidera em aderência; Série ${a.worstSerie.serie} é a que mais precisa de atenção.`,
+      advice: `Use a Série ${a.bestSerie.serie} como referência de rotina e apoie a Série ${a.worstSerie.serie}.`,
+    });
+  }
+
+  return cards;
+}
+
+/* ============ blocos de UI ============ */
+function StatTile({ label, value, sub, tone = "blue" }) {
+  const c = TONE[tone] || P.blue;
+  return (
+    <div style={{
+      background: P.panel, border: `1px solid ${P.border}`, borderRadius: 12,
+      padding: "12px 16px", minWidth: 132, flex: "1 1 132px",
+    }}>
+      <div style={{ fontSize: 11, color: P.muted, fontWeight: 600, letterSpacing: ".03em", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 800, color: c, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: P.textSoft, marginTop: 5 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ViewTab({ active, icon, label, hint, onClick }) {
+  return (
+    <button onClick={onClick} title={hint} style={{
+      display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+      background: active ? `linear-gradient(180deg, ${P.headFrom}, ${P.headTo})` : "#101c36",
+      border: `1px solid ${active ? P.blue : P.borderSoft}`,
+      boxShadow: active ? `0 0 0 1px ${P.blue}55, 0 6px 18px -10px ${P.blue}` : "none",
+      color: active ? "#fff" : P.textSoft, borderRadius: 10, padding: "9px 20px",
+      cursor: "pointer", fontSize: 14, fontWeight: 700, minWidth: 128, transition: "all .12s",
+    }}>
+      <span>{icon} {label}</span>
+      <span style={{ fontSize: 10, fontWeight: 500, color: active ? "#cfe0f6" : P.muted }}>{hint}</span>
+    </button>
+  );
+}
+
+function Bar({ value, tone = "blue", height = 8 }) {
+  const c = TONE[tone] || P.blue;
+  const w = Math.max(0, Math.min(1, value)) * 100;
+  return (
+    <div style={{ background: "#0b1526", border: `1px solid ${P.borderSoft}`, borderRadius: 6, height, overflow: "hidden" }}>
+      <div style={{ width: w + "%", height: "100%", background: `linear-gradient(90deg, ${c}99, ${c})` }} />
+    </div>
   );
 }
 
@@ -467,6 +668,7 @@ export default function EscalaApp() {
   const [year, setYear] = useState(2026);
   const [openCell, setOpenCell] = useState(null); // {wi, serie, di}
   const [errors, setErrors] = useState([]);
+  const [view, setView] = useState("confronto"); // confronto | distribuir | insights
   const xlsxRef = useRef(null), csvRef = useRef(null);
 
   const pushError = (m) => setErrors((e) => [...e, m]);
@@ -476,7 +678,7 @@ export default function EscalaApp() {
     setEmps(EXAMPLE_EMPS); setEmpsSource("Exemplo · aba PASVC Jul"); setWb(null); setSheetName("PASVC Jul");
     const secs = parseEscalaCsv(EXAMPLE_ESCALA_CSV);
     setEscSections(secs); setEscSource("Exemplo · escala Pouso Alegre Julho");
-    setSectionName(secs[0]?.name || ""); setOpenCell(null);
+    setSectionName(secs[0]?.name || ""); setOpenCell(null); setView("confronto");
   };
 
   const onXlsx = async (file) => {
@@ -534,8 +736,8 @@ export default function EscalaApp() {
   const stats = useMemo(() => {
     if (!model) return null;
     let red = 0, amber = 0, blue = 0;
-    model.weeks.forEach((w) => w.rows.forEach((r) => r.cells.forEach((c) => c.alerts.forEach((a) => {
-      if (a.sev === "red") red++; else if (a.sev === "amber") amber++; else if (a.sev === "blue") blue++;
+    model.weeks.forEach((w) => w.rows.forEach((r) => r.cells.forEach((c) => c.alerts.forEach((al) => {
+      if (al.sev === "red") red++; else if (al.sev === "amber") amber++; else if (al.sev === "blue") blue++;
     }))));
     return { red, amber, blue };
   }, [model]);
@@ -547,232 +749,393 @@ export default function EscalaApp() {
     return m;
   }, [emps]);
 
+  const A = useMemo(() => (model && section ? analyze(model, section) : null), [model, section]);
+  const insights = useMemo(() => (A ? buildInsights(A) : []), [A]);
+
   /* ---------- estilos base ---------- */
   const S = {
-    page: { minHeight: "100vh", background: "#0b111c", color: "#dfe5f1", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", padding: "20px 22px 60px" },
-    panel: { background: "#101827", border: "1px solid #1d2739", borderRadius: 10 },
-    btn: { background: "#182338", border: "1px solid #2a3852", color: "#dfe5f1", borderRadius: 7, padding: "7px 13px", fontSize: 13, cursor: "pointer", fontWeight: 600 },
-    select: { background: "#0d1420", border: "1px solid #2a3852", color: "#dfe5f1", borderRadius: 7, padding: "6px 9px", fontSize: 13 },
+    page: { minHeight: "100vh", background: `radial-gradient(1100px 520px at 50% -220px, #17274c 0%, ${P.bg} 58%)`, color: P.text, fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", padding: "0 16px 80px" },
+    container: { maxWidth: 1200, margin: "0 auto", paddingTop: 26 },
+    panel: { background: P.panel, border: `1px solid ${P.border}`, borderRadius: 12 },
+    btn: { background: "#16233f", border: `1px solid ${P.borderSoft}`, color: P.text, borderRadius: 9, padding: "8px 14px", fontSize: 13, cursor: "pointer", fontWeight: 600 },
+    select: { background: "#0c1526", border: `1px solid ${P.borderSoft}`, color: P.text, borderRadius: 8, padding: "7px 10px", fontSize: 13 },
     mono: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" },
   };
 
+  const hasData = !!model;
+
   return (
     <div style={S.page}>
-      {/* cabeçalho */}
-      <div style={{ display: "flex", alignItems: "baseline", gap: 14, flexWrap: "wrap", marginBottom: 14 }}>
-        <h1 style={{ margin: 0, fontSize: 21, fontWeight: 800, letterSpacing: "-0.01em" }}>
-          Distribuição de escala <span style={{ color: "#5a9bd4" }}>× absenteísmo</span>
-        </h1>
-        <span style={{ fontSize: 12, color: "#8b93a1" }}>
-          Cruza a escala das séries (A/B/C/D) com a presença real, dia a dia. Clique numa célula para explodir o detalhe.
-        </span>
-      </div>
-
-      {/* controles */}
-      <div style={{ ...S.panel, padding: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
-        <button style={{ ...S.btn, background: "#1c3050", borderColor: "#33507e" }} onClick={loadExample}>
-          ▶ Carregar exemplo (PA SVC · Julho)
-        </button>
-        <span style={{ width: 1, height: 24, background: "#1d2739" }} />
-        <input ref={xlsxRef} type="file" accept=".xlsx,.xlsm" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onXlsx(e.target.files[0])} />
-        <button style={S.btn} onClick={() => xlsxRef.current.click()}>1 · Planilha de absenteísmo (.xlsx)</button>
-        {wb && (
-          <select style={S.select} value={sheetName} onChange={(e) => pickSheet(e.target.value)}>
-            {wb.SheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-        )}
-        <input ref={csvRef} type="file" accept=".csv,.txt" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onCsv(e.target.files[0])} />
-        <button style={S.btn} onClick={() => csvRef.current.click()}>2 · Escala do site (.csv)</button>
-        {escSections && (
-          <select style={S.select} value={sectionName} onChange={(e) => { setSectionName(e.target.value); setOpenCell(null); }}>
-            {escSections.map((s) => <option key={s.name} value={s.name}>{s.name} — {s.title.replace(/ - [^-]+$/, "")}</option>)}
-          </select>
-        )}
-        <label style={{ fontSize: 12, color: "#8b93a1", marginLeft: "auto" }}>
-          Ano{" "}
-          <input type="number" value={year} onChange={(e) => setYear(+e.target.value || 2026)}
-            style={{ ...S.select, width: 70, ...S.mono }} />
-        </label>
-      </div>
-
-      {/* fontes carregadas + erros */}
-      {(empsSource || escSource) && (
-        <div style={{ fontSize: 12, color: "#8b93a1", marginBottom: 8, display: "flex", gap: 16, flexWrap: "wrap" }}>
-          {empsSource && <span>Presenças: <b style={{ color: "#c8cede" }}>{empsSource}{wb ? ` · aba ${sheetName}` : ""}</b> {emps && `(${emps.length} pessoas)`}</span>}
-          {escSource && <span>Escala: <b style={{ color: "#c8cede" }}>{escSource}</b>{section && ` · ${section.name} · séries ${section.series.join("/")}`}</span>}
-          {mainMonth && <span>Mês detectado: <b style={{ color: "#c8cede" }}>{String(mainMonth).padStart(2, "0")}/{year}</b></span>}
+      <div style={S.container}>
+        {/* cabeçalho */}
+        <div style={{ textAlign: "center", marginBottom: 18 }}>
+          <h1 style={{ margin: 0, fontSize: 26, fontWeight: 800, letterSpacing: "-0.01em" }}>
+            Distribuição de escala <span style={{ color: P.blue }}>× absenteísmo</span>
+          </h1>
+          <p style={{ margin: "6px auto 0", maxWidth: 640, fontSize: 13, color: P.muted, lineHeight: 1.5 }}>
+            Cruze a escala das séries (A/B/C/D) com a presença real, dia a dia. Confronte metas, distribua o efetivo e leia os insights para agir com clareza.
+          </p>
         </div>
-      )}
-      {errors.map((e, i) => (
-        <div key={i} style={{ ...S.panel, borderColor: "#ef5b6255", background: "#1c1016", padding: "8px 12px", fontSize: 13, color: "#ef9ba0", marginBottom: 8 }}>⚠ {e}</div>
-      ))}
 
+        {/* controles */}
+        <div style={{ ...S.panel, padding: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+          <button style={{ ...S.btn, background: `linear-gradient(180deg, ${P.headFrom}, ${P.headTo})`, borderColor: P.blue, color: "#fff" }} onClick={loadExample}>
+            ▶ Carregar exemplo (PA SVC · Julho)
+          </button>
+          <span style={{ width: 1, height: 24, background: P.borderSoft }} />
+          <input ref={xlsxRef} type="file" accept=".xlsx,.xlsm" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onXlsx(e.target.files[0])} />
+          <button style={S.btn} onClick={() => xlsxRef.current.click()}>1 · Planilha de absenteísmo (.xlsx)</button>
+          {wb && (
+            <select style={S.select} value={sheetName} onChange={(e) => pickSheet(e.target.value)}>
+              {wb.SheetNames.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          )}
+          <input ref={csvRef} type="file" accept=".csv,.txt" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onCsv(e.target.files[0])} />
+          <button style={S.btn} onClick={() => csvRef.current.click()}>2 · Escala do site (.csv)</button>
+          {escSections && (
+            <select style={S.select} value={sectionName} onChange={(e) => { setSectionName(e.target.value); setOpenCell(null); }}>
+              {escSections.map((s) => <option key={s.name} value={s.name}>{s.name} — {s.title.replace(/ - [^-]+$/, "")}</option>)}
+            </select>
+          )}
+          <label style={{ fontSize: 12, color: P.muted }}>
+            Ano{" "}
+            <input type="number" value={year} onChange={(e) => setYear(+e.target.value || 2026)}
+              style={{ ...S.select, width: 74, ...S.mono }} />
+          </label>
+        </div>
+
+        {/* fontes carregadas + erros */}
+        {(empsSource || escSource) && (
+          <div style={{ fontSize: 12, color: P.muted, marginBottom: 10, display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center" }}>
+            {empsSource && <span>Presenças: <b style={{ color: P.textSoft }}>{empsSource}{wb ? ` · aba ${sheetName}` : ""}</b> {emps && `(${emps.length} pessoas)`}</span>}
+            {escSource && <span>Escala: <b style={{ color: P.textSoft }}>{escSource}</b>{section && ` · ${section.name} · séries ${section.series.join("/")}`}</span>}
+            {mainMonth && <span>Mês: <b style={{ color: P.textSoft }}>{monthName(mainMonth)}/{year}</b></span>}
+          </div>
+        )}
+        {errors.map((e, i) => (
+          <div key={i} style={{ ...S.panel, borderColor: "#ef5b6255", background: "#1c1016", padding: "8px 12px", fontSize: 13, color: "#ef9ba0", marginBottom: 8 }}>⚠ {e}</div>
+        ))}
+
+        {/* estado vazio (centralizado) */}
+        {!hasData && !errors.length && (
+          <div style={{ ...S.panel, padding: "48px 32px", textAlign: "center", color: P.muted, fontSize: 14, maxWidth: 720, margin: "0 auto" }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>📊</div>
+            <div style={{ fontSize: 16, color: P.textSoft, fontWeight: 600, marginBottom: 6 }}>Comece carregando os dados</div>
+            <div style={{ lineHeight: 1.6 }}>
+              Envie a <b style={{ color: P.textSoft }}>planilha de absenteísmo (.xlsx)</b> e o <b style={{ color: P.textSoft }}>CSV de escala</b> —
+              ou clique em <b style={{ color: P.blue }}>Carregar exemplo</b> para explorar o caso Pouso Alegre SVC.
+            </div>
+          </div>
+        )}
+
+        {/* ===== conteúdo com dados ===== */}
+        {hasData && (
+          <>
+            {/* KPIs */}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14, justifyContent: "center" }}>
+              <StatTile label="Pessoas na aba" value={emps.length} tone="blue" sub={`${section.series.length} séries ativas`} />
+              <StatTile label="Aderência à meta" value={pct(A.adher)} tone={A.adher >= 0.98 ? "green" : A.adher >= 0.9 ? "amber" : "red"} sub={`${A.presentSum}/${A.targetSum} presenças`} />
+              <StatTile label="Dias no alvo" value={`${A.okDays}/${A.days}`} tone={A.okDays === A.days ? "green" : "amber"} sub="por série · dia útil" />
+              <StatTile label="Déficits" value={stats.amber + stats.red} tone={stats.red ? "red" : stats.amber ? "amber" : "green"} sub={`${stats.red} críticos`} />
+              <StatTile label="Excedentes" value={stats.blue} tone="blue" sub={`${A.excess} realocáveis`} />
+              <StatTile label="Furos de folga" value={A.dsrViol} tone={A.dsrViol ? "red" : "green"} sub="presença em DSR" />
+            </div>
+
+            {/* barra de ações / navegação */}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center", marginBottom: 6 }}>
+              <ViewTab active={view === "confronto"} icon="⚔️" label="Confrontar" hint="meta × presença real" onClick={() => setView("confronto")} />
+              <ViewTab active={view === "distribuir"} icon="⚖️" label="Distribuir" hint="equilíbrio do efetivo" onClick={() => setView("distribuir")} />
+              <ViewTab active={view === "insights"} icon="💡" label="Insights" hint="leitura gerencial" onClick={() => setView("insights")} />
+            </div>
+
+            {/* aviso: pessoas sem série válida */}
+            {noSerie.length > 0 && (
+              <div style={{ ...S.panel, borderColor: "#e2a63b55", background: "#1a1610", padding: "8px 12px", fontSize: 12, color: "#e2c08a", margin: "12px 0" }}>
+                ⚠ {noSerie.length} pessoa(s) com turno fora das séries ativas ({section.series.join("/")}) e que ficaram fora da distribuição:{" "}
+                {noSerie.map((e) => `${e[0]} (${e[1]})`).join(" · ")}
+              </div>
+            )}
+
+            {view === "confronto" && (
+              <ConfrontoView model={model} section={section} mainMonth={mainMonth} serieCounts={serieCounts} openCell={openCell} setOpenCell={setOpenCell} S={S} />
+            )}
+            {view === "distribuir" && <DistribuirView A={A} section={section} serieCounts={serieCounts} S={S} />}
+            {view === "insights" && <InsightsView insights={insights} A={A} S={S} />}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============ view: CONFRONTAR (grade meta × presença) ============ */
+function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOpenCell, S }) {
+  return (
+    <>
+      <ViewIntro
+        S={S}
+        text={<>Cada célula mostra <b style={{ color: P.text }}>presentes / meta</b> do dia. Cores sinalizam <span style={{ color: P.red }}>déficit crítico</span>, <span style={{ color: P.amber }}>déficit</span> e <span style={{ color: P.blue }}>excedente</span>; células verdes são <b style={{ color: P.green }}>DSR</b> (folga da série). Clique numa célula para explodir quem é quem.</>}
+      />
       {/* legenda */}
-      <div style={{ ...S.panel, padding: "8px 12px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12, fontSize: 11 }}>
+      <div style={{ ...S.panel, padding: "8px 12px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14, fontSize: 11 }}>
         {Object.entries(CODE_INFO).filter(([c]) => c !== "").map(([c, info]) => (
-          <span key={c} style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "#aeb6c6" }}>
+          <span key={c} style={{ display: "inline-flex", alignItems: "center", gap: 5, color: P.textSoft }}>
             <Chip code={c} small /> {info.label}
           </span>
         ))}
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "#aeb6c6" }}><Chip code="" small /> Sem registro</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: P.textSoft }}><Chip code="" small /> Sem registro</span>
       </div>
 
-      {/* resumo */}
-      {emps && section && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16, fontSize: 12 }}>
-          <div style={{ ...S.panel, padding: "6px 12px" }}>
-            <b style={{ ...S.mono, fontSize: 15 }}>{emps.length}</b> <span style={{ color: "#8b93a1" }}>pessoas na aba</span>
-          </div>
-          {section.series.map((s) => (
-            <div key={s} style={{ ...S.panel, padding: "6px 12px" }}>
-              <b style={{ color: "#5a9bd4" }}>Série {s}</b>{" "}
-              <b style={{ ...S.mono, fontSize: 15 }}>{serieCounts[s] || 0}</b>
+      {model.weeks.map((w) => {
+        const first = w.dates[0], last = w.dates[6];
+        const range = `${pad2(first.d)}/${pad2(first.m)} a ${pad2(last.d)}/${pad2(last.m)}`;
+        const folgas = w.rows.map((r) => ({ serie: r.serie, dsr: r.cells.filter((c) => c.escVal === "DSR").length }));
+        const std = folgas.length > 0 && folgas.every((f) => f.dsr === folgas[0].dsr);
+        return (
+          <div key={w.wi} style={{ ...S.panel, marginBottom: 18, overflow: "hidden" }}>
+            {/* cabeçalho degradê (2º print) */}
+            <div style={{ padding: "11px 16px", background: `linear-gradient(90deg, ${P.headFrom}, ${P.headTo})`, borderBottom: `1px solid ${P.blue}44`, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <b style={{ fontSize: 15, color: "#fff" }}>{monthName(mainMonth)} · {section.name} — {ORD[w.wi]} semana</b>
+              <span style={{ fontSize: 12, color: "#bcd2f0", ...S.mono }}>{range}</span>
+              <span style={{ fontSize: 11, color: "#8fb0dd", marginLeft: "auto" }}>presentes / meta · clique para detalhar</span>
             </div>
-          ))}
-          {stats && (
-            <div style={{ ...S.panel, padding: "6px 12px", display: "flex", gap: 12 }}>
-              <span style={{ color: sevColor.red }}>● {stats.red} críticos</span>
-              <span style={{ color: sevColor.amber }}>● {stats.amber} déficits</span>
-              <span style={{ color: sevColor.blue }}>● {stats.blue} excedentes</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* aviso: pessoas sem série válida */}
-      {noSerie.length > 0 && (
-        <div style={{ ...S.panel, borderColor: "#e2a63b55", background: "#1a1610", padding: "8px 12px", fontSize: 12, color: "#e2c08a", marginBottom: 14 }}>
-          ⚠ {noSerie.length} pessoa(s) com turno fora das séries ativas ({section.series.join("/")}) e que ficaram fora da distribuição:{" "}
-          {noSerie.map((e) => `${e[0]} (${e[1]})`).join(" · ")}
-        </div>
-      )}
-
-      {/* estado vazio */}
-      {!model && !errors.length && (
-        <div style={{ ...S.panel, padding: 40, textAlign: "center", color: "#8b93a1", fontSize: 14 }}>
-          Envie a planilha de absenteísmo e o CSV de escala — ou use o botão <b style={{ color: "#c8cede" }}>Carregar exemplo</b> para ver o caso Pouso Alegre SVC.
-        </div>
-      )}
-
-      {/* semanas */}
-      {model?.weeks.map((w) => (
-        <div key={w.wi} style={{ ...S.panel, marginBottom: 18, overflow: "hidden" }}>
-          <div style={{ padding: "9px 14px", borderBottom: "1px solid #1d2739", display: "flex", alignItems: "center", gap: 10 }}>
-            <b style={{ fontSize: 14 }}>{w.label}</b>
-            <span style={{ fontSize: 11, color: "#8b93a1" }}>meta/dia por série conforme escala · presença real da aba</span>
-          </div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 780 }}>
-              <thead>
-                <tr>
-                  <th style={{ padding: "7px 10px", fontSize: 11, color: "#8b93a1", textAlign: "left", borderBottom: "1px solid #1d2739", width: 74 }}>Série</th>
-                  {w.dates.map((dt, di) => (
-                    <th key={di} style={{ padding: "7px 6px", fontSize: 11, color: "#8b93a1", borderBottom: "1px solid #1d2739" }}>
-                      {WEEKDAYS[di]}
-                      <div style={{ ...S.mono, fontSize: 12, color: "#c8cede" }}>
-                        {String(dt.d).padStart(2, "0")}/{String(dt.m).padStart(2, "0")}
-                      </div>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {w.rows.map((row) => (
-                  <React.Fragment key={row.serie}>
-                    <tr>
-                      <td style={{ padding: "6px 10px", borderBottom: "1px solid #16203100", fontWeight: 800, color: "#5a9bd4", fontSize: 14 }}>
-                        {row.serie}
-                        <div style={{ fontSize: 10, color: "#5d6a7d", fontWeight: 500 }}>{serieCounts[row.serie] || 0} pessoas</div>
-                      </td>
-                      {row.cells.map((cell, di) => {
-                        const isOpen = openCell && openCell.wi === w.wi && openCell.serie === row.serie && openCell.di === di;
-                        const isDsr = cell.escVal === "DSR";
-                        const hasRed = cell.alerts.some((a) => a.sev === "red");
-                        const hasAmber = cell.alerts.some((a) => a.sev === "amber");
-                        const hasBlue = cell.alerts.some((a) => a.sev === "blue");
-                        const border = hasRed ? "#ef5b62" : hasAmber ? "#e2a63b" : hasBlue ? "#5a9bd4" : isDsr ? "#2a5d47" : "#26518a";
-                        const gap = typeof cell.escVal === "number" ? cell.counts.present - cell.escVal : null;
-                        return (
-                          <td key={di} style={{ padding: 4, verticalAlign: "top" }}>
-                            <button
-                              onClick={() => setOpenCell(isOpen ? null : { wi: w.wi, serie: row.serie, di })}
-                              title={cell.alerts.map((a) => a.msg).join("\n") || "Sem alertas"}
-                              style={{
-                                width: "100%", minHeight: 56, cursor: cell.inMonth ? "pointer" : "default",
-                                background: isOpen ? "#1b2740" : !cell.inMonth ? "#0d1420" : isDsr ? "#0f1a17" : "#0f1726",
-                                border: `1px solid ${!cell.inMonth ? "#1d2739" : border}${isOpen ? "" : "66"}`,
-                                borderRadius: 7, padding: "5px 7px", color: "inherit", textAlign: "left",
-                                boxShadow: isOpen ? `0 0 0 1px ${border}` : "none", position: "relative",
-                              }}
-                            >
-                              {!cell.inMonth ? (
-                                <span style={{ fontSize: 10, color: "#42506a" }}>{isDsr ? "DSR" : cell.escVal} · fora do mês</span>
-                              ) : isDsr ? (
-                                <>
-                                  <span style={{ fontSize: 12, fontWeight: 800, color: "#3d9a72", letterSpacing: ".05em" }}>DSR</span>
-                                  {cell.counts.present > 0 && (
-                                    <div style={{ fontSize: 10, color: "#ef5b62", fontWeight: 700 }}>⚠ {cell.counts.present} presentes</div>
-                                  )}
-                                  {cell.counts.absent > 0 && <div style={{ fontSize: 10, color: "#8b93a1" }}>{cell.counts.absent} ausências</div>}
-                                </>
-                              ) : (
-                                <>
-                                  <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
-                                    <span style={{ ...S.mono, fontSize: 15, fontWeight: 800, color: hasRed ? "#ef5b62" : hasAmber ? "#e2a63b" : "#3fb96b" }}>
-                                      {cell.counts.present}
-                                    </span>
-                                    <span style={{ fontSize: 10, color: "#5d6a7d" }}>/ {cell.escVal}</span>
-                                    {gap !== null && gap !== 0 && <DiffBadge gap={gap} />}
-                                  </div>
-                                  <div style={{ fontSize: 9.5, color: "#8b93a1", marginTop: 2 }}>
-                                    {cell.counts.absent > 0 && <span style={{ color: "#ef9ba0" }}>{cell.counts.absent} aus · </span>}
-                                    {cell.counts.dsr > 0 && <span>{cell.counts.dsr} dsr · </span>}
-                                    {cell.counts.planned > 0 && <span>{cell.counts.planned} prog · </span>}
-                                    {cell.counts.none > 0 && <span style={{ color: "#42506a" }}>{cell.counts.none} s/reg</span>}
-                                  </div>
-                                </>
-                              )}
-                              {cell.inMonth && cell.alerts.some((a) => a.sev !== "info") && (
-                                <span style={{ position: "absolute", top: 5, right: 6, width: 7, height: 7, borderRadius: "50%", background: border }} />
-                              )}
-                            </button>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                    {openCell && openCell.wi === w.wi && openCell.serie === row.serie && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 820 }}>
+                <thead>
+                  <tr>
+                    <th style={{ padding: "9px 12px", fontSize: 11, color: P.textSoft, textAlign: "left", borderBottom: `1px solid ${P.borderSoft}`, width: 92 }}>Série</th>
+                    {w.dates.map((dt, di) => (
+                      <th key={di} style={{ padding: "9px 6px", fontSize: 11, fontWeight: 700, color: P.blue, borderBottom: `1px solid ${P.borderSoft}` }}>
+                        {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][di]}
+                        <div style={{ ...S.mono, fontSize: 12, color: P.textSoft, fontWeight: 500 }}>
+                          {pad2(dt.d)}/{pad2(dt.m)}
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {w.rows.map((row) => (
+                    <React.Fragment key={row.serie}>
                       <tr>
-                        <td colSpan={8} style={{ padding: "0 8px 12px" }}>
-                          <CellDetail cell={row.cells[openCell.di]} onClose={() => setOpenCell(null)} S={S} />
+                        <td style={{ padding: "6px 12px", fontWeight: 800, color: P.blue, fontSize: 15 }}>
+                          {row.serie}
+                          <div style={{ fontSize: 10, color: P.faint, fontWeight: 500 }}>{serieCounts[row.serie] || 0} pessoas</div>
                         </td>
+                        {row.cells.map((cell, di) => {
+                          const isOpen = openCell && openCell.wi === w.wi && openCell.serie === row.serie && openCell.di === di;
+                          const isDsr = cell.escVal === "DSR";
+                          const hasRed = cell.alerts.some((al) => al.sev === "red");
+                          const hasAmber = cell.alerts.some((al) => al.sev === "amber");
+                          const hasBlue = cell.alerts.some((al) => al.sev === "blue");
+                          const border = hasRed ? P.red : hasAmber ? P.amber : hasBlue ? P.blue : isDsr ? P.green : P.blueDim;
+                          const gap = typeof cell.escVal === "number" ? cell.counts.present - cell.escVal : null;
+                          return (
+                            <td key={di} style={{ padding: 4, verticalAlign: "top" }}>
+                              <button
+                                onClick={() => setOpenCell(isOpen ? null : { wi: w.wi, serie: row.serie, di })}
+                                title={cell.alerts.map((al) => al.msg).join("\n") || "Sem alertas"}
+                                style={{
+                                  width: "100%", minHeight: 58, cursor: cell.inMonth ? "pointer" : "default",
+                                  background: isOpen ? "#1b2740" : !cell.inMonth ? "#0a1220" : isDsr ? "rgba(60,189,119,.10)" : "#0d1628",
+                                  border: `1px solid ${!cell.inMonth ? P.borderSoft : border}${isOpen ? "" : isDsr ? "" : "70"}`,
+                                  borderRadius: 8, padding: "6px 8px", color: "inherit", textAlign: "left",
+                                  boxShadow: isOpen ? `0 0 0 1px ${border}` : isDsr && cell.inMonth ? `0 0 0 1px ${P.green}33, inset 0 0 22px -14px ${P.green}` : "none",
+                                  position: "relative",
+                                }}
+                              >
+                                {!cell.inMonth ? (
+                                  <span style={{ fontSize: 10, color: P.faint }}>{isDsr ? "DSR" : cell.escVal} · fora do mês</span>
+                                ) : isDsr ? (
+                                  <>
+                                    <span style={{ fontSize: 13, fontWeight: 800, color: P.green, letterSpacing: ".06em" }}>DSR</span>
+                                    {cell.counts.present > 0 && (
+                                      <div style={{ fontSize: 10, color: P.red, fontWeight: 700 }}>⚠ {cell.counts.present} presentes</div>
+                                    )}
+                                    {cell.counts.absent > 0 && <div style={{ fontSize: 10, color: P.muted }}>{cell.counts.absent} ausências</div>}
+                                  </>
+                                ) : (
+                                  <>
+                                    <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
+                                      <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: hasRed ? P.red : hasAmber ? P.amber : P.green }}>
+                                        {cell.counts.present}
+                                      </span>
+                                      <span style={{ fontSize: 10, color: P.faint }}>/ {cell.escVal}</span>
+                                      {gap !== null && gap !== 0 && <DiffBadge gap={gap} />}
+                                    </div>
+                                    <div style={{ fontSize: 9.5, color: P.muted, marginTop: 2 }}>
+                                      {cell.counts.absent > 0 && <span style={{ color: "#ef9ba0" }}>{cell.counts.absent} aus · </span>}
+                                      {cell.counts.dsr > 0 && <span>{cell.counts.dsr} dsr · </span>}
+                                      {cell.counts.planned > 0 && <span>{cell.counts.planned} prog · </span>}
+                                      {cell.counts.none > 0 && <span style={{ color: P.faint }}>{cell.counts.none} s/reg</span>}
+                                    </div>
+                                  </>
+                                )}
+                                {cell.inMonth && cell.alerts.some((al) => al.sev !== "info") && (
+                                  <span style={{ position: "absolute", top: 6, right: 7, width: 7, height: 7, borderRadius: "50%", background: border }} />
+                                )}
+                              </button>
+                            </td>
+                          );
+                        })}
                       </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-                {/* totais do dia */}
-                <tr>
-                  <td style={{ padding: "6px 10px", fontSize: 11, color: "#8b93a1", borderTop: "1px solid #1d2739" }}>Total dia</td>
-                  {w.dates.map((dt, di) => {
-                    const target = w.rows.reduce((s, r) => s + (typeof r.cells[di].escVal === "number" ? r.cells[di].escVal : 0), 0);
-                    const pres = w.rows.reduce((s, r) => s + (r.cells[di].inMonth ? r.cells[di].counts.present : 0), 0);
-                    const anyIn = w.rows.some((r) => r.cells[di].inMonth);
-                    return (
-                      <td key={di} style={{ padding: "6px", borderTop: "1px solid #1d2739", textAlign: "center", fontSize: 11 }}>
-                        {anyIn ? (
-                          <span style={S.mono}>
-                            <b style={{ color: pres >= target ? "#3fb96b" : "#e2a63b" }}>{pres}</b>
-                            <span style={{ color: "#5d6a7d" }}> / {target}</span>
-                          </span>
-                        ) : <span style={{ color: "#42506a" }}>—</span>}
-                      </td>
-                    );
-                  })}
-                </tr>
-              </tbody>
-            </table>
+                      {openCell && openCell.wi === w.wi && openCell.serie === row.serie && (
+                        <tr>
+                          <td colSpan={8} style={{ padding: "0 8px 12px" }}>
+                            <CellDetail cell={row.cells[openCell.di]} onClose={() => setOpenCell(null)} S={S} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))}
+                  {/* totais do dia */}
+                  <tr>
+                    <td style={{ padding: "7px 12px", fontSize: 11, color: P.muted, borderTop: `1px solid ${P.border}` }}>Total dia</td>
+                    {w.dates.map((dt, di) => {
+                      const target = w.rows.reduce((s, r) => s + (typeof r.cells[di].escVal === "number" ? r.cells[di].escVal : 0), 0);
+                      const pres = w.rows.reduce((s, r) => s + (r.cells[di].inMonth ? r.cells[di].counts.present : 0), 0);
+                      const anyIn = w.rows.some((r) => r.cells[di].inMonth);
+                      return (
+                        <td key={di} style={{ padding: "7px 6px", borderTop: `1px solid ${P.border}`, textAlign: "center", fontSize: 12 }}>
+                          {anyIn ? (
+                            <span style={S.mono}>
+                              <b style={{ color: pres >= target ? P.green : P.amber }}>{pres}</b>
+                              <span style={{ color: P.faint }}> / {target}</span>
+                            </span>
+                          ) : <span style={{ color: P.faint }}>—</span>}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            {/* resumo de folgas (2º print) */}
+            <div style={{ padding: "9px 14px", borderTop: `1px solid ${P.borderSoft}`, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".08em", color: P.muted }}>RESUMO</span>
+              {folgas.map((f) => (
+                <span key={f.serie} style={{ fontSize: 11, color: P.green, border: `1px solid ${P.green}55`, background: "rgba(60,189,119,.10)", borderRadius: 20, padding: "3px 11px" }}>
+                  Série {f.serie}: {f.dsr} folga{f.dsr === 1 ? "" : "s"}
+                </span>
+              ))}
+              <span style={{ fontSize: 11, color: std ? P.green : P.amber, border: `1px solid ${(std ? P.green : P.amber)}55`, background: std ? "rgba(60,189,119,.10)" : "rgba(230,172,66,.10)", borderRadius: 20, padding: "3px 11px" }}>
+                {std ? `tudo dentro do padrão (${folgas[0].dsr} folgas/série)` : "padrão de folga irregular"}
+              </span>
+            </div>
           </div>
+        );
+      })}
+    </>
+  );
+}
+
+/* ============ view: DISTRIBUIR (equilíbrio do efetivo) ============ */
+function DistribuirView({ A, section, serieCounts, S }) {
+  const maxDayAbs = Math.max(1, ...A.weekdays.map((d) => Math.abs(d.gap)));
+  return (
+    <>
+      <ViewIntro
+        S={S}
+        text={<>Veja como o <b style={{ color: P.text }}>efetivo se distribui</b> entre séries e dias da semana. Séries com <span style={{ color: P.blue }}>sobra</span> podem apoiar as com <span style={{ color: P.amber }}>falta</span>; use isto para reequilibrar a escala antes de recorrer a hora extra.</>}
+      />
+
+      {/* por série */}
+      <div style={{ ...S.panel, padding: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: P.textSoft, marginBottom: 12 }}>Distribuição por série</div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {A.series.map((s) => {
+            const tone = s.adher >= 0.98 ? "green" : s.adher >= 0.9 ? "amber" : "red";
+            return (
+              <div key={s.serie} style={{ display: "grid", gridTemplateColumns: "88px 1fr 130px", gap: 12, alignItems: "center" }}>
+                <div>
+                  <b style={{ color: P.blue, fontSize: 15 }}>Série {s.serie}</b>
+                  <div style={{ fontSize: 10, color: P.faint }}>{serieCounts[s.serie] || 0} pessoas</div>
+                </div>
+                <div>
+                  <Bar value={s.adher} tone={tone} height={10} />
+                  <div style={{ fontSize: 10.5, color: P.muted, marginTop: 4 }}>
+                    {s.present}/{s.target} presenças · {s.dsrDays} folgas · {s.absent} ausências
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <b style={{ ...S.mono, fontSize: 18, color: TONE[tone] }}>{pct(s.adher)}</b>
+                  <div style={{ fontSize: 10, color: P.muted }}>aderência</div>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      ))}
+      </div>
+
+      {/* por dia da semana */}
+      <div style={{ ...S.panel, padding: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: P.textSoft, marginBottom: 4 }}>Equilíbrio por dia da semana</div>
+        <div style={{ fontSize: 11, color: P.muted, marginBottom: 14 }}>Saldo acumulado (presentes − meta) somando todas as séries e semanas. Barras à direita = sobra; à esquerda = falta.</div>
+        <div style={{ display: "grid", gap: 8 }}>
+          {A.weekdays.map((d) => {
+            const w = (Math.abs(d.gap) / maxDayAbs) * 50;
+            const pos = d.gap >= 0;
+            return (
+              <div key={d.i} style={{ display: "grid", gridTemplateColumns: "108px 1fr 54px", gap: 10, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: P.textSoft }}>{["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][d.i]}</span>
+                <div style={{ position: "relative", height: 16, background: "#0b1526", border: `1px solid ${P.borderSoft}`, borderRadius: 5 }}>
+                  <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: P.faint }} />
+                  <div style={{
+                    position: "absolute", top: 2, bottom: 2, borderRadius: 3,
+                    [pos ? "left" : "right"]: "50%", width: w + "%",
+                    background: pos ? P.green : d.gap < 0 && Math.abs(d.gap) >= d.target * 0.2 ? P.red : P.amber,
+                  }} />
+                </div>
+                <b style={{ ...S.mono, fontSize: 13, textAlign: "right", color: pos ? P.green : P.amber }}>{d.gap > 0 ? `+${d.gap}` : d.gap}</b>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* sugestão de realocação */}
+      {A.worstDay && A.surplusDay && A.worstDay.gap < 0 && A.surplusDay.gap > 0 && (
+        <div style={{ ...S.panel, borderColor: `${P.blue}55`, background: "rgba(95,159,227,.07)", padding: "12px 16px", fontSize: 13, color: P.textSoft }}>
+          💡 <b style={{ color: P.blue }}>Sugestão de reequilíbrio:</b> {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][A.surplusDay.i]} acumula <b style={{ color: P.green }}>+{A.surplusDay.gap}</b> de sobra
+          enquanto {["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"][A.worstDay.i]} tem <b style={{ color: P.amber }}>{A.worstDay.gap}</b> de falta.
+          Antecipar folgas ou remanejar presenças entre esses dias suaviza a cobertura sem aumentar o efetivo.
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ============ view: INSIGHTS ============ */
+function InsightsView({ insights, A, S }) {
+  return (
+    <>
+      <ViewIntro
+        S={S}
+        text={<>Leitura automática dos números com <b style={{ color: P.text }}>recomendação de ação</b> para cada ponto. Pense nisto como o resumo executivo do mês — o que está bom, o que exige atenção e o próximo passo.</>}
+      />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 12 }}>
+        {insights.map((c, i) => (
+          <div key={i} style={{ ...S.panel, borderColor: `${TONE[c.tone]}44`, padding: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 20 }}>{c.icon}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: P.muted, letterSpacing: ".02em" }}>{c.title}</span>
+            </div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: TONE[c.tone] }}>{c.value}</div>
+            <div style={{ fontSize: 12.5, color: P.textSoft, lineHeight: 1.5 }}>{c.detail}</div>
+            <div style={{ fontSize: 12.5, color: P.text, lineHeight: 1.5, borderLeft: `2px solid ${TONE[c.tone]}`, paddingLeft: 9, marginTop: 2 }}>
+              <b style={{ color: TONE[c.tone] }}>→</b> {c.advice}
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function ViewIntro({ text, S }) {
+  return (
+    <div style={{ fontSize: 12.5, color: P.muted, lineHeight: 1.55, margin: "12px auto 14px", maxWidth: 820, textAlign: "center" }}>
+      {text}
     </div>
   );
 }
@@ -795,16 +1158,16 @@ function CellDetail({ cell, onClose, S }) {
   Object.values(byGroup).forEach((arr) => arr.sort((a, b) => a.nome.localeCompare(b.nome)));
 
   return (
-    <div style={{ background: "#0d1420", border: "1px solid #2a3852", borderRadius: 9, padding: 14 }}>
+    <div style={{ background: P.panelSoft, border: `1px solid ${P.border}`, borderRadius: 10, padding: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
         <b style={{ fontSize: 14 }}>
-          Série {cell.serie} · {String(cell.date.d).padStart(2, "0")}/{String(cell.date.m).padStart(2, "0")} ·{" "}
+          Série {cell.serie} · {pad2(cell.date.d)}/{pad2(cell.date.m)} ·{" "}
           {cell.escVal === "DSR" ? "DSR da série" : `meta ${cell.escVal}`}
         </b>
-        <span style={{ fontSize: 12, color: "#8b93a1" }}>
+        <span style={{ fontSize: 12, color: P.muted }}>
           {cell.counts.present} presentes · {cell.counts.absent} ausências · {cell.counts.dsr} DSR · {cell.counts.off} desligados · {cell.counts.none} sem registro
         </span>
-        <button onClick={onClose} style={{ marginLeft: "auto", background: "none", border: "1px solid #2a3852", color: "#8b93a1", borderRadius: 6, padding: "3px 10px", cursor: "pointer", fontSize: 12 }}>
+        <button onClick={onClose} style={{ marginLeft: "auto", background: "none", border: `1px solid ${P.border}`, color: P.muted, borderRadius: 6, padding: "3px 10px", cursor: "pointer", fontSize: 12 }}>
           Fechar ✕
         </button>
       </div>
@@ -825,9 +1188,9 @@ function CellDetail({ cell, onClose, S }) {
           const arr = byGroup[g.key];
           if (!arr?.length) return null;
           return (
-            <div key={g.key} style={{ background: "#101827", border: "1px solid #1d2739", borderRadius: 8, padding: 10 }}>
-              <div style={{ fontSize: 11, fontWeight: 800, color: "#8b93a1", letterSpacing: ".06em", textTransform: "uppercase", marginBottom: 8 }}>
-                {g.title} <span style={{ color: "#5a9bd4" }}>· {arr.length}</span>
+            <div key={g.key} style={{ background: P.panel, border: `1px solid ${P.borderSoft}`, borderRadius: 8, padding: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: P.muted, letterSpacing: ".06em", textTransform: "uppercase", marginBottom: 8 }}>
+                {g.title} <span style={{ color: P.blue }}>· {arr.length}</span>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 260, overflowY: "auto" }}>
                 {arr.map((p, i) => (
@@ -841,7 +1204,7 @@ function CellDetail({ cell, onClose, S }) {
             </div>
           );
         })}
-        {cell.people.length === 0 && <div style={{ fontSize: 13, color: "#8b93a1" }}>Nenhuma pessoa nesta série / dia.</div>}
+        {cell.people.length === 0 && <div style={{ fontSize: 13, color: P.muted }}>Nenhuma pessoa nesta série / dia.</div>}
       </div>
     </div>
   );
