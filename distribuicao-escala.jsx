@@ -351,6 +351,72 @@ function parseEscalaCsv(text) {
   return sections.filter((s) => s.weeks.length);
 }
 
+/* ============ unificação de turnos (AM+PM) guiada pela planilha 1 ============ */
+// base do nome da seção (título sem o sufixo do turno). ex.: "Escala Julho - Varginha - AM" -> "Escala Julho - Varginha"
+const sectionBase = (title) => title.replace(/\s*-\s*[^-]+$/, "").trim();
+const shiftOf = (name) => {
+  const u = String(name).toUpperCase().trim();
+  if (u === "AM") return "AM";
+  if (u === "PM") return "PM";
+  return null; // SD e demais não são turnos mescláveis
+};
+
+// a planilha 1 distingue AM/PM? (procura marcadores de turno na coluna Turno)
+function empsAreShiftAware(emps) {
+  if (!emps) return false;
+  return emps.some((e) => /(^|[^A-Z])(AM|PM)([^A-Z]|$)/.test(String(e[1]).toUpperCase()));
+}
+
+// mescla seções de turno (AM + PM) somando as metas por série/dia; DSR só permanece se for DSR em ambos
+function mergeShiftSections(base, secs) {
+  const series = secs.find((s) => s.series.length)?.series.slice() || [];
+  const weeksCount = Math.max(...secs.map((s) => s.weeks.length));
+  const weeks = [];
+  for (let wi = 0; wi < weeksCount; wi++) {
+    const refW = secs.map((s) => s.weeks[wi]).find(Boolean);
+    if (!refW) continue;
+    const rows = {};
+    series.forEach((se) => {
+      rows[se] = Array.from({ length: 7 }, (_, di) => {
+        let sum = 0, allDsr = true, any = false;
+        secs.forEach((s) => {
+          const v = s.weeks[wi]?.rows[se]?.[di];
+          if (v === undefined) return;
+          any = true;
+          if (typeof v === "number") { sum += v; allDsr = false; }
+        });
+        if (!any) return undefined;
+        return allDsr ? "DSR" : sum;
+      });
+    });
+    weeks.push({ ...refW, rows, totals: null });
+  }
+  return { title: `${base} - AM+PM`, name: "AM+PM", series, weeks, merged: true };
+}
+
+// lista de seções apresentável: mescla AM+PM (mantendo SD à parte) quando a planilha 1 não distingue turno
+function unifySections(escSections, shiftAware) {
+  if (!escSections) return null;
+  if (shiftAware) return escSections;
+  const groups = new Map(); // base -> { am, pm, others: [] }
+  escSections.forEach((s) => {
+    const base = sectionBase(s.title);
+    const g = groups.get(base) || { base, am: null, pm: null, others: [] };
+    const sh = shiftOf(s.name);
+    if (sh === "AM") g.am = s;
+    else if (sh === "PM") g.pm = s;
+    else g.others.push(s);
+    groups.set(base, g);
+  });
+  const out = [];
+  for (const g of groups.values()) {
+    if (g.am && g.pm) out.push(mergeShiftSections(g.base, [g.am, g.pm]));
+    else { if (g.am) out.push(g.am); if (g.pm) out.push(g.pm); }
+    g.others.forEach((o) => out.push(o));
+  }
+  return out;
+}
+
 /* ============ parse: aba de absenteísmo (modelo 1) ============ */
 function parseAbsSheet(ws) {
   const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" });
@@ -720,7 +786,13 @@ export default function EscalaApp() {
     } catch (e) { pushError("Falha ao ler o CSV: " + e.message); }
   };
 
-  const section = useMemo(() => escSections?.find((s) => s.name === sectionName) || null, [escSections, sectionName]);
+  // planilha 1 manda: se ela não distingue AM/PM, unifica AM+PM na escala (mantendo SD separado)
+  const shiftAware = useMemo(() => empsAreShiftAware(emps), [emps]);
+  const displaySections = useMemo(() => unifySections(escSections, shiftAware), [escSections, shiftAware]);
+  const section = useMemo(() => {
+    if (!displaySections?.length) return null;
+    return displaySections.find((s) => s.name === sectionName) || displaySections[0];
+  }, [displaySections, sectionName]);
   const mainMonth = useMemo(() => (section ? detectMainMonth(section, year) : null), [section, year]);
 
   const model = useMemo(() => {
@@ -802,9 +874,9 @@ export default function EscalaApp() {
           )}
           <input ref={csvRef} type="file" accept=".csv,.txt" style={{ display: "none" }} onChange={(e) => e.target.files[0] && onCsv(e.target.files[0])} />
           <button style={S.btn} onClick={() => csvRef.current.click()}>2 · Escala do site (.csv)</button>
-          {escSections && (
-            <select style={S.select} value={sectionName} onChange={(e) => { setSectionName(e.target.value); setOpenCell(null); }}>
-              {escSections.map((s) => <option key={s.name} value={s.name}>{s.name} — {s.title.replace(/ - [^-]+$/, "")}</option>)}
+          {displaySections && (
+            <select style={S.select} value={section?.name || ""} onChange={(e) => { setSectionName(e.target.value); setOpenCell(null); }}>
+              {displaySections.map((s) => <option key={s.name} value={s.name}>{s.name} — {sectionBase(s.title)}</option>)}
             </select>
           )}
         </div>
@@ -813,7 +885,8 @@ export default function EscalaApp() {
         {(empsSource || escSource) && (
           <div style={{ fontSize: 12, color: P.muted, marginBottom: 10, display: "flex", gap: 16, flexWrap: "wrap", justifyContent: "center" }}>
             {empsSource && <span>Presenças: <b style={{ color: P.textSoft }}>{empsSource}{wb ? ` · aba ${sheetName}` : ""}</b> {emps && `(${emps.length} pessoas)`}</span>}
-            {escSource && <span>Escala: <b style={{ color: P.textSoft }}>{escSource}</b>{section && ` · ${section.name} · séries ${section.series.join("/")}`}</span>}
+            {escSource && <span>Escala: <b style={{ color: P.textSoft }}>{escSource}</b>{section && ` · ${section.name} · séries ${section.series.join("/")}`}{section?.merged && <b style={{ color: P.green }}> · AM+PM unificado</b>}</span>}
+            {escSource && !shiftAware && displaySections?.some((s) => s.merged) && !section?.merged && <span style={{ color: P.muted }}>· AM/PM unificados (planilha 1 sem distinção de turno)</span>}
             {mainMonth && <span>Mês: <b style={{ color: P.textSoft }}>{monthName(mainMonth)}/{year}</b></span>}
           </div>
         )}
