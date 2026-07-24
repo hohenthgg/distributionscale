@@ -1152,7 +1152,9 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                           {splittable && <div style={{ fontSize: 10, color: P.faint, fontWeight: 500 }}>{serieCounts[row.serie] ?? (row.cells.find((c) => c.inMonth)?.total ?? 0)} pessoas</div>}
                         </td>
                         {row.cells.map((cell, di) => {
-                          const isOpen = openCell && openCell.wi === w.wi && openCell.serie === row.serie && openCell.di === di;
+                          const isOpen = splittable
+                            ? (openCell && openCell.wi === w.wi && openCell.serie === row.serie && openCell.di === di)
+                            : (openDay && openDay.wi === w.wi && openDay.di === di);
                           const isDsr = cell.escVal === "DSR";
                           const hasRed = cell.alerts.some((al) => al.sev === "red");
                           const hasAmber = cell.alerts.some((al) => al.sev === "amber");
@@ -1163,13 +1165,20 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                           const absTone = cell.absRate == null ? P.muted : cell.absRate >= 0.2 ? P.red : cell.absRate > 0 ? P.amber : P.green;
                           const comp = cell.parts && (typeof cell.parts.am === "number" || typeof cell.parts.pm === "number")
                             ? `${pl(cell.parts.am)} AM · ${pl(cell.parts.pm)} PM` : null;
+                          // abs do dia vs meta do quadro (modo sem série): ausências totais do dia / meta do dia
+                          const dayMeta = w.rows.reduce((s, r) => s + (typeof r.cells[di].escVal === "number" ? r.cells[di].escVal : 0), 0);
+                          const dayAbsRate = dayMeta > 0 ? (w.dayAll?.[di]?.absent || 0) / dayMeta : null;
+                          const dayAbsPct = dayAbsRate != null ? Math.round(dayAbsRate * 100) + "%" : null;
+                          const dayAbsTone = dayAbsRate == null ? P.muted : dayAbsRate >= 0.2 ? P.red : dayAbsRate > 0 ? P.amber : P.green;
                           return (
                             <td key={di} style={{ padding: 4, verticalAlign: "top" }}>
                               <button
-                                onClick={splittable ? () => setOpenCell(isOpen ? null : { wi: w.wi, serie: row.serie, di }) : undefined}
-                                title={splittable ? (cell.alerts.map((al) => al.msg).join("\n") || "Sem alertas") : ""}
+                                onClick={!cell.inMonth ? undefined : splittable
+                                  ? () => setOpenCell(isOpen ? null : { wi: w.wi, serie: row.serie, di })
+                                  : () => setOpenDay(isOpen ? null : { wi: w.wi, di })}
+                                title={splittable ? (cell.alerts.map((al) => al.msg).join("\n") || "Sem alertas") : "Clique para ver o detalhe do dia"}
                                 style={{
-                                  width: "100%", minHeight: 58, cursor: splittable && cell.inMonth ? "pointer" : "default",
+                                  width: "100%", minHeight: 58, cursor: cell.inMonth ? "pointer" : "default",
                                   background: isOpen ? "#1b2740" : !cell.inMonth ? "#0a1220" : isDsr ? "rgba(60,189,119,.10)" : "#0d1628",
                                   border: `1px solid ${!cell.inMonth ? P.borderSoft : border}${isOpen ? "" : isDsr ? "" : "70"}`,
                                   borderRadius: 8, padding: "6px 8px", color: "inherit", textAlign: "left",
@@ -1217,7 +1226,13 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                       <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: P.blue }}>{cell.escVal}</span>
                                       <span style={{ fontSize: 9.5, color: P.faint }}>meta</span>
                                     </div>
-                                    {comp && <div style={{ fontSize: 9.5, color: P.textSoft, marginTop: 2 }}>{comp}</div>}
+                                    {comp && <div style={{ fontSize: 9, color: P.blue, marginTop: 1 }}>{comp}</div>}
+                                    {dayAbsPct != null && (
+                                      <div style={{ fontSize: 9.5, marginTop: 2 }}>
+                                        <span style={{ color: dayAbsTone, fontWeight: 700 }}>abs {dayAbsPct}</span>{" "}
+                                        <span style={{ color: P.faint }}>no dia</span>
+                                      </div>
+                                    )}
                                   </>
                                 )}
                                 {splittable && cell.inMonth && cell.alerts.some((al) => al.sev !== "info") && (
