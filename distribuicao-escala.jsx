@@ -1103,7 +1103,7 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
         S={S}
         text={splittable
           ? <>Cada célula mostra <b style={{ color: P.text }}>presentes / meta</b> do dia. Cores sinalizam <span style={{ color: P.red }}>déficit crítico</span>, <span style={{ color: P.amber }}>déficit</span> e <span style={{ color: P.blue }}>excedente</span>; células verdes são <b style={{ color: P.green }}>DSR</b> (folga da série). Clique numa célula para explodir quem é quem.</>
-          : <>Quadro fixo da escala por série (A/B/C/D), com a <b style={{ color: P.text }}>meta AM+PM</b> de cada dia. Como a planilha nominal não separa por série, os <b style={{ color: P.text }}>presentes</b> aparecem na linha <b>Presentes</b> (total do dia) — clique numa célula dessa linha para ver quem está presente, ausente e o motivo.</>}
+          : <>Quadro por série (A/B/C/D) com a <b style={{ color: P.text }}>meta AM+PM</b> de cada dia. Como a planilha não informa a série de cada pessoa, os presentes por célula são uma <b style={{ color: P.text }}>estimativa proporcional</b> (marcada com ≈); o total do dia e o detalhe (ao clicar na célula) são reais.</>}
       />
       {/* legenda */}
       <div style={{ ...S.panel, padding: "8px 12px", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14, fontSize: 11 }}>
@@ -1114,6 +1114,12 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
         ))}
         <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: P.textSoft }}><Chip code="" small /> Sem registro</span>
       </div>
+
+      {!splittable && (
+        <div style={{ ...S.panel, borderColor: `${P.amber}55`, background: "rgba(230,172,66,.08)", padding: "10px 14px", fontSize: 12.5, color: "#e2c08a", marginBottom: 14 }}>
+          <b>Lembrete — </b>a distribuição por série (A/B/C/D) <b>não foi feita conforme a planilha</b>: a informação de turno/série de cada pessoa está <b>pendente</b> (coluna Turno em branco). Os valores por célula são uma <b>estimativa proporcional</b> (total do dia ÷ séries que trabalham), marcados com <b>≈</b>. O total do dia (linha <b>Total dia</b>) e o detalhe ao clicar são reais.
+        </div>
+      )}
 
       {model.weeks.map((w) => {
         const first = w.dates[0], last = w.dates[6];
@@ -1165,11 +1171,14 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                           const absTone = cell.absRate == null ? P.muted : cell.absRate >= 0.2 ? P.red : cell.absRate > 0 ? P.amber : P.green;
                           const comp = cell.parts && (typeof cell.parts.am === "number" || typeof cell.parts.pm === "number")
                             ? `${pl(cell.parts.am)} AM · ${pl(cell.parts.pm)} PM` : null;
-                          // abs do dia vs meta do quadro (modo sem série): ausências totais do dia / meta do dia
+                          // modo sem série: distribui o total do dia proporcionalmente à meta (estimativa)
                           const dayMeta = w.rows.reduce((s, r) => s + (typeof r.cells[di].escVal === "number" ? r.cells[di].escVal : 0), 0);
+                          const dayPresent = w.dayAll?.[di]?.present || 0;
+                          const estPresent = dayMeta > 0 && typeof cell.escVal === "number" ? Math.round(dayPresent * cell.escVal / dayMeta) : null;
                           const dayAbsRate = dayMeta > 0 ? (w.dayAll?.[di]?.absent || 0) / dayMeta : null;
                           const dayAbsPct = dayAbsRate != null ? Math.round(dayAbsRate * 100) + "%" : null;
                           const dayAbsTone = dayAbsRate == null ? P.muted : dayAbsRate >= 0.2 ? P.red : dayAbsRate > 0 ? P.amber : P.green;
+                          const estGap = estPresent != null ? estPresent - cell.escVal : null;
                           return (
                             <td key={di} style={{ padding: 4, verticalAlign: "top" }}>
                               <button
@@ -1223,14 +1232,17 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                                 ) : (
                                   <>
                                     <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
-                                      <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: P.blue }}>{cell.escVal}</span>
-                                      <span style={{ fontSize: 9.5, color: P.faint }}>meta</span>
+                                      <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: estPresent == null ? P.blue : estPresent >= cell.escVal ? P.green : estPresent >= cell.escVal * 0.8 ? P.amber : P.red }}>
+                                        {estPresent == null ? cell.escVal : `≈${estPresent}`}
+                                      </span>
+                                      <span style={{ fontSize: 10, color: P.faint }}>/ {cell.escVal}</span>
+                                      {estGap != null && estGap !== 0 && <DiffBadge gap={estGap} />}
                                     </div>
                                     {comp && <div style={{ fontSize: 9, color: P.blue, marginTop: 1 }}>{comp}</div>}
                                     {dayAbsPct != null && (
                                       <div style={{ fontSize: 9.5, marginTop: 2 }}>
                                         <span style={{ color: dayAbsTone, fontWeight: 700 }}>abs {dayAbsPct}</span>{" "}
-                                        <span style={{ color: P.faint }}>no dia</span>
+                                        <span style={{ color: P.faint }}>estim.</span>
                                       </div>
                                     )}
                                   </>
@@ -1252,42 +1264,13 @@ function ConfrontoView({ model, section, mainMonth, serieCounts, openCell, setOp
                       )}
                     </React.Fragment>
                   ))}
-                  {/* linha de presentes (modo sem série) — clicável para ver o dia */}
-                  {!splittable && (
-                    <React.Fragment>
-                      <tr>
-                        <td style={{ padding: "6px 12px", fontSize: 13, fontWeight: 800, color: P.green, borderTop: `1px solid ${P.border}` }}>Presentes</td>
-                        {w.dates.map((dt, di) => {
-                          const da = w.dayAll?.[di];
-                          const anyIn = w.rows.some((r) => r.cells[di].inMonth);
-                          const target = w.rows.reduce((s, r) => s + (typeof r.cells[di].escVal === "number" ? r.cells[di].escVal : 0), 0);
-                          const isOpenD = openDay && openDay.wi === w.wi && openDay.di === di;
-                          const ok = da && da.present >= target;
-                          return (
-                            <td key={di} style={{ padding: 4, verticalAlign: "top", borderTop: `1px solid ${P.border}` }}>
-                              {anyIn ? (
-                                <button onClick={() => setOpenDay(isOpenD ? null : { wi: w.wi, di })}
-                                  title="Clique para ver quem está presente/ausente neste dia"
-                                  style={{ width: "100%", cursor: "pointer", background: isOpenD ? "#1b2740" : "#0d1628", border: `1px solid ${(ok ? P.green : P.amber)}70`, borderRadius: 8, padding: "6px 8px", color: "inherit", textAlign: "left", boxShadow: isOpenD ? `0 0 0 1px ${ok ? P.green : P.amber}` : "none" }}>
-                                  <div style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
-                                    <span style={{ ...S.mono, fontSize: 16, fontWeight: 800, color: ok ? P.green : P.amber }}>{da.present}</span>
-                                    <span style={{ fontSize: 10, color: P.faint }}>/ {target}</span>
-                                  </div>
-                                  <div style={{ fontSize: 9, color: P.muted, marginTop: 1 }}>{da.absent} aus · ver detalhe</div>
-                                </button>
-                              ) : <span style={{ fontSize: 10, color: P.faint }}>—</span>}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                      {openDay && openDay.wi === w.wi && (
-                        <tr>
-                          <td colSpan={8} style={{ padding: "0 8px 12px" }}>
-                            <DayDetail day={w.dayAll[openDay.di]} onClose={() => setOpenDay(null)} S={S} />
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
+                  {/* detalhe do dia (modo sem série) — aberto ao clicar numa célula */}
+                  {!splittable && openDay && openDay.wi === w.wi && (
+                    <tr>
+                      <td colSpan={8} style={{ padding: "0 8px 12px" }}>
+                        <DayDetail day={w.dayAll[openDay.di]} onClose={() => setOpenDay(null)} S={S} />
+                      </td>
+                    </tr>
                   )}
                   {/* totais do dia */}
                   <tr>
