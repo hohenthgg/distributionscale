@@ -433,24 +433,38 @@ function pickMatchingSheet(sheetNames, escSource, wantSuffix) {
   if (!loc || !sheetNames?.length) return null;
   const MONTHS_RE = /JUL|JAN|FEV|MAR|ABR|MAI|JUN|AGO|SET|OUT|NOV|DEZ/g;
   const SUFFIXES = ["SVC", "SD", "FULL", "XD"];
-  const isSubseq = (sub, str) => { if (!sub) return false; let i = 0; for (const ch of str) { if (ch === sub[i]) i++; if (i === sub.length) return true; } return false; };
-  let best = null, bestScore = 0;
+  // span da subsequência (menor = letras mais próximas na localidade); Infinity se não casar
+  const subseqSpan = (sub, str) => {
+    if (!sub) return Infinity;
+    let i = 0, first = -1, last = -1;
+    for (let k = 0; k < str.length; k++) {
+      if (str[k] === sub[i]) { if (first < 0) first = k; i++; last = k; if (i === sub.length) return last - first; }
+    }
+    return Infinity;
+  };
+  let best = null, bestScore = 0, bestSpan = Infinity;
   sheetNames.forEach((name) => {
     const N = norm(name).replace(MONTHS_RE, "");
     const suffix = SUFFIXES.find((s) => N.includes(s)) || "";
     const prefix = suffix ? N.slice(0, N.indexOf(suffix)) : N;
+    const span = subseqSpan(prefix, loc);
     let score = 0;
-    if (prefix && isSubseq(prefix, loc)) score += 3;          // localidade da escala bate com o prefixo da aba
-    if (wantSuffix && suffix === wantSuffix) score += 2;       // tipo (SVC/SD) bate
-    if (score > bestScore) { bestScore = score; best = name; }
+    if (span !== Infinity) score += 3;                        // localidade da escala bate com o prefixo da aba
+    if (wantSuffix && suffix === wantSuffix) score += 2;      // tipo (SVC/SD) bate
+    if (score > bestScore || (score === bestScore && score >= 3 && span < bestSpan)) { bestScore = score; best = name; bestSpan = span; }
   });
   return bestScore >= 3 ? best : null;
 }
-// tipo de aba esperado a partir das seções da escala (AM+PM -> SVC; só SD -> SD)
+// tipo de aba esperado a partir das seções da escala.
+// serviço principal = SVC quando há AM/PM (turno) OU uma seção "SVC"; SD só quando a escala é SD.
 function wantSuffixOf(secs) {
-  const hasAM = secs.some((s) => shiftOf(s.name) === "AM");
-  const hasPM = secs.some((s) => shiftOf(s.name) === "PM");
-  return hasAM && hasPM ? "SVC" : secs.some((s) => /^SD$/i.test(s.name)) ? "SD" : null;
+  const names = secs.map((s) => String(s.name).toUpperCase().trim());
+  const hasAMPM = names.includes("AM") && names.includes("PM");
+  if (hasAMPM || names.includes("SVC")) return "SVC";
+  if (names.includes("FULL")) return "FULL";
+  if (names.includes("XD")) return "XD";
+  if (names.includes("SD")) return "SD";
+  return null;
 }
 
 /* ============ parse: aba de absenteísmo (modelo 1) ============ */
